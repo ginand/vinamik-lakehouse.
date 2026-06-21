@@ -337,27 +337,26 @@ services:
       dockerfile: Dockerfile
     container_name: vinamik-airflow-init
     depends_on:
-      - bronze-streaming
+      postgres:
+        condition: service_healthy
     env_file:
       - .env
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:vinamik%402024@postgres/airflow_db
       AIRFLOW__CORE__FERNET_KEY: 'ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg='
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-      # Đường dẫn tới code Spark & dbt (mount từ host)
-      SPARK_JOBS_DIR: /opt/spark-jobs
-      DBT_GOLD_DIR: /opt/dbt_gold
       AZURE_STORAGE_ACCOUNT_NAME: ${AZURE_STORAGE_ACCOUNT_NAME}
       AZURE_STORAGE_ACCOUNT_KEY: ${AZURE_STORAGE_ACCOUNT_KEY}
       EVENT_HUBS_CONNECTION_STRING: ${EVENT_HUBS_CONNECTION_STRING}
     volumes:
       - airflow_data:/opt/airflow
-      - ./dags:/opt/airflow/dags          # DAG files
-      - ./spark:/opt/spark-jobs            # silver_batch.py
-      - ./dbt_gold:/opt/dbt_gold           # dbt Gold project
-    command: airflow db init
+      - ./dags:/opt/airflow/dags
+      - ./spark:/opt/spark-jobs
+      - ./dbt_gold:/opt/dbt_gold
+    command: >
+      bash -c "airflow db migrate && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@vinamik.local"
     restart: on-failure
 
   # ─────────────────────────────────────────────────────────
@@ -374,7 +373,7 @@ services:
       - .env
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:vinamik%402024@postgres/airflow_db
       AIRFLOW__CORE__FERNET_KEY: 'ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg='
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
@@ -403,7 +402,7 @@ services:
       - .env
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:vinamik%402024@postgres/airflow_db
       AIRFLOW__CORE__FERNET_KEY: 'ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg='
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
       AIRFLOW__WEBSERVER__SECRET_KEY: 'vinamik-secret-2024'

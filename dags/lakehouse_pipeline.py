@@ -10,6 +10,7 @@ Thứ tự thực thi:
                      (Silver Delta → Gold Delta via DuckDB + dbt-duckdb)
 """
 
+import os
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.bash import BashOperator
@@ -31,7 +32,7 @@ DEFAULT_ARGS = {
 # Cấu hình đường dẫn (mount vào container Airflow)
 # ─────────────────────────────────────────────────────────
 SPARK_SUBMIT = (
-    "/opt/spark/bin/spark-submit"
+    "/home/airflow/.local/bin/spark-submit"
     " --master local[*]"
     " --packages io.delta:delta-spark_2.12:3.2.1,"
                 "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,"
@@ -42,7 +43,7 @@ SPARK_SUBMIT = (
 )
 
 DBT_RUN = (
-    "dbt run"
+    "/home/airflow/.local/bin/dbt run"
     " --project-dir /opt/dbt_gold"
     " --profiles-dir /opt/dbt_gold"
     " --target dev"
@@ -70,9 +71,9 @@ with DAG(
         bash_command=SPARK_SUBMIT,
         # Truyền env vars từ Airflow vào process
         env={
-            "AZURE_STORAGE_ACCOUNT_NAME": "{{ var.value.AZURE_STORAGE_ACCOUNT_NAME }}",
-            "AZURE_STORAGE_ACCOUNT_KEY":  "{{ var.value.AZURE_STORAGE_ACCOUNT_KEY }}",
-            "EVENT_HUBS_CONNECTION_STRING": "{{ var.value.EVENT_HUBS_CONNECTION_STRING }}",
+            "AZURE_STORAGE_ACCOUNT_NAME": os.environ.get("AZURE_STORAGE_ACCOUNT_NAME", ""),
+            "AZURE_STORAGE_ACCOUNT_KEY":  os.environ.get("AZURE_STORAGE_ACCOUNT_KEY", ""),
+            "EVENT_HUBS_CONNECTION_STRING": os.environ.get("EVENT_HUBS_CONNECTION_STRING", ""),
         },
         doc_md="""
         ### Silver Batch
@@ -86,13 +87,13 @@ with DAG(
         task_id="gold_dbt_run",
         bash_command=DBT_RUN,
         env={
-            "AZURE_STORAGE_ACCOUNT_NAME": "{{ var.value.AZURE_STORAGE_ACCOUNT_NAME }}",
-            "AZURE_STORAGE_ACCOUNT_KEY":  "{{ var.value.AZURE_STORAGE_ACCOUNT_KEY }}",
+            "AZURE_STORAGE_ACCOUNT_NAME": os.environ.get("AZURE_STORAGE_ACCOUNT_NAME", ""),
+            "AZURE_STORAGE_ACCOUNT_KEY":  os.environ.get("AZURE_STORAGE_ACCOUNT_KEY", ""),
             # DuckDB azure extension dùng connection string
             "AZURE_STORAGE_CONNECTION_STRING": (
                 "DefaultEndpointsProtocol=https;"
-                "AccountName={{ var.value.AZURE_STORAGE_ACCOUNT_NAME }};"
-                "AccountKey={{ var.value.AZURE_STORAGE_ACCOUNT_KEY }};"
+                f"AccountName={os.environ.get('AZURE_STORAGE_ACCOUNT_NAME', '')};"
+                f"AccountKey={os.environ.get('AZURE_STORAGE_ACCOUNT_KEY', '')};"
                 "EndpointSuffix=core.windows.net"
             ),
         },
