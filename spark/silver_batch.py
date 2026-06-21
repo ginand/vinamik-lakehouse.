@@ -526,18 +526,16 @@ def run_silver_batch(spark: SparkSession):
 
 
 if __name__ == "__main__":
-    logger.info("🚀 VinaMilk Silver Batch — starting")
+    logger.info("🚀 VinaMilk Silver Batch — starting (one-off run, managed by Airflow)")
     logger.info(f"   ADLS Account : {STORAGE_ACCOUNT}")
-    logger.info(f"   Run interval : every {RUN_INTERVAL_MIN} minutes")
     logger.info(f"   Bronze path  : {BRONZE_PATH}")
     logger.info(f"   Silver path  : {SILVER_PATH}")
 
     spark = create_spark()
+    try:
+        run_silver_batch(spark)
+    except Exception as e:
+        logger.error(f"❌ Silver batch failed: {e}")
+        sys.exit(1)
 
-    while True:
-        try:
-            run_silver_batch(spark)
-        except Exception as e:
-            logger.error(f"❌ Silver batch crashed: {e}")
-        logger.info(f"💤 Sleeping {RUN_INTERVAL_MIN} minutes until next run...")
-        time.sleep(RUN_INTERVAL_MIN * 60)
+    logger.info("✅ Silver Batch finished — exiting cleanly for Airflow")

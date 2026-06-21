@@ -1,0 +1,12 @@
+vinamik-gold:
+  outputs:
+    dev:
+      type: duckdb
+      path: ":memory:"
+      extensions:
+        - delta
+        - azure
+      settings:
+        # Kết nối ADLS Gen2 qua Access Key
+        azure_storage_connection_string: "{{ env_var('AZURE_STORAGE_CONNECTION_STRING', '') }}"
+  target: dev

@@ -1,0 +1,23 @@
+name: vinamik_gold
+version: '1.0.0'
+config-version: 2
+
+profile: vinamik-gold
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+# Biến môi trường dùng trong models
+vars:
+  storage_account: "{{ env_var('AZURE_STORAGE_ACCOUNT_NAME', 'vmlakehouse2024') }}"
+  storage_key: "{{ env_var('AZURE_STORAGE_ACCOUNT_KEY', '') }}"
+  silver_container: "silver"
+  gold_container: "gold"
+
+models:
+  vinamik_gold:
+    +materialized: external   # Ghi file Delta ra ADLS Gen2 thay vì bảng DuckDB tạm
+    +tags: ["gold"]

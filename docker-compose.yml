@@ -329,45 +329,94 @@ services:
     restart: unless-stopped
 
   # ─────────────────────────────────────────────────────────
-  # 12. SILVER BATCH — PySpark Job (Bronze → Silver)
+  # 12. AIRFLOW INIT — Khởi tạo database Airflow lần đầu
   # ─────────────────────────────────────────────────────────
-  silver-batch:
+  airflow-init:
     build:
-      context: ./spark
+      context: ./airflow
       dockerfile: Dockerfile
-    container_name: vinamik-silver-batch
+    container_name: vinamik-airflow-init
     depends_on:
       - bronze-streaming
     env_file:
       - .env
-    command: >
-      /opt/spark/bin/spark-submit 
-      --master local[*] 
-      --packages io.delta:delta-spark_2.12:3.2.1,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.hadoop:hadoop-azure:3.3.4 
-      --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension 
-      --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog 
-      silver_batch.py
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__CORE__FERNET_KEY: 'ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg='
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      # Đường dẫn tới code Spark & dbt (mount từ host)
+      SPARK_JOBS_DIR: /opt/spark-jobs
+      DBT_GOLD_DIR: /opt/dbt_gold
+      AZURE_STORAGE_ACCOUNT_NAME: ${AZURE_STORAGE_ACCOUNT_NAME}
+      AZURE_STORAGE_ACCOUNT_KEY: ${AZURE_STORAGE_ACCOUNT_KEY}
+      EVENT_HUBS_CONNECTION_STRING: ${EVENT_HUBS_CONNECTION_STRING}
+    volumes:
+      - airflow_data:/opt/airflow
+      - ./dags:/opt/airflow/dags          # DAG files
+      - ./spark:/opt/spark-jobs            # silver_batch.py
+      - ./dbt_gold:/opt/dbt_gold           # dbt Gold project
+    command: airflow db init
+    restart: on-failure
+
+  # ─────────────────────────────────────────────────────────
+  # 13. AIRFLOW SCHEDULER — Đọc DAG, bấm lịch chạy
+  # ─────────────────────────────────────────────────────────
+  airflow-scheduler:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    container_name: vinamik-airflow-scheduler
+    depends_on:
+      - airflow-init
+    env_file:
+      - .env
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__CORE__FERNET_KEY: 'ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg='
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AZURE_STORAGE_ACCOUNT_NAME: ${AZURE_STORAGE_ACCOUNT_NAME}
+      AZURE_STORAGE_ACCOUNT_KEY: ${AZURE_STORAGE_ACCOUNT_KEY}
+      EVENT_HUBS_CONNECTION_STRING: ${EVENT_HUBS_CONNECTION_STRING}
+    volumes:
+      - airflow_data:/opt/airflow
+      - ./dags:/opt/airflow/dags
+      - ./spark:/opt/spark-jobs
+      - ./dbt_gold:/opt/dbt_gold
+    command: airflow scheduler
     restart: unless-stopped
 
   # ─────────────────────────────────────────────────────────
-  # 13. GOLD BATCH — PySpark Job (Silver → Gold)
+  # 14. AIRFLOW WEBSERVER — UI theo dõi DAG tại localhost:8888
   # ─────────────────────────────────────────────────────────
-  gold-batch:
+  airflow-webserver:
     build:
-      context: ./spark
+      context: ./airflow
       dockerfile: Dockerfile
-    container_name: vinamik-gold-batch
+    container_name: vinamik-airflow-webserver
     depends_on:
-      - silver-batch
+      - airflow-scheduler
     env_file:
       - .env
-    command: >
-      /opt/spark/bin/spark-submit 
-      --master local[*] 
-      --packages io.delta:delta-spark_2.12:3.2.1,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.hadoop:hadoop-azure:3.3.4 
-      --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension 
-      --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog 
-      gold_batch.py
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__CORE__FERNET_KEY: 'ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg='
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__WEBSERVER__SECRET_KEY: 'vinamik-secret-2024'
+      AZURE_STORAGE_ACCOUNT_NAME: ${AZURE_STORAGE_ACCOUNT_NAME}
+      AZURE_STORAGE_ACCOUNT_KEY: ${AZURE_STORAGE_ACCOUNT_KEY}
+    volumes:
+      - airflow_data:/opt/airflow
+      - ./dags:/opt/airflow/dags
+      - ./spark:/opt/spark-jobs
+      - ./dbt_gold:/opt/dbt_gold
+    ports:
+      - "8888:8080"      # Airflow UI: http://localhost:8888
+    command: airflow webserver
     restart: unless-stopped
 
 # ─────────────────────────────────────────────────────────
@@ -384,6 +433,8 @@ volumes:
   postgres_data:
     driver: local
   misa_csv_data:
+    driver: local
+  airflow_data:
     driver: local
 
 # ─────────────────────────────────────────────────────────
