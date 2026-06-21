@@ -328,6 +328,48 @@ services:
              python budget_plan_producer.py --loop"
     restart: unless-stopped
 
+  # ─────────────────────────────────────────────────────────
+  # 12. SILVER BATCH — PySpark Job (Bronze → Silver)
+  # ─────────────────────────────────────────────────────────
+  silver-batch:
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    container_name: vinamik-silver-batch
+    depends_on:
+      - bronze-streaming
+    env_file:
+      - .env
+    command: >
+      /opt/spark/bin/spark-submit 
+      --master local[*] 
+      --packages io.delta:delta-spark_2.12:3.2.1,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.hadoop:hadoop-azure:3.3.4 
+      --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension 
+      --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog 
+      silver_batch.py
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────────────────
+  # 13. GOLD BATCH — PySpark Job (Silver → Gold)
+  # ─────────────────────────────────────────────────────────
+  gold-batch:
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    container_name: vinamik-gold-batch
+    depends_on:
+      - silver-batch
+    env_file:
+      - .env
+    command: >
+      /opt/spark/bin/spark-submit 
+      --master local[*] 
+      --packages io.delta:delta-spark_2.12:3.2.1,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.hadoop:hadoop-azure:3.3.4 
+      --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension 
+      --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog 
+      gold_batch.py
+    restart: unless-stopped
+
 # ─────────────────────────────────────────────────────────
 # VOLUMES — Persistent data storage
 
