@@ -1,0 +1,22 @@
+# ─────────────────────────────────────────────────────────
+# VinaMilk Data Lakehouse — Shared Python Requirements
+# Dùng chung cho: data_generator + producers (MISA, FX, Budget)
+# ─────────────────────────────────────────────────────────
+
+# Database (data_generator → PostgreSQL)
+psycopg2-binary>=2.9.9
+
+# Kafka / Event Hubs
+kafka-python>=2.0.2
+
+# HTTP (fx_rate_producer → ExchangeRate API)
+requests>=2.31.0
+
+# Scheduling (misa_csv_producer, budget_plan_producer)
+schedule>=1.2.0
+
+# Date utilities (budget_plan_producer → relativedelta)
+python-dateutil>=2.8.2
+
+# Environment variables
+python-dotenv>=1.0.0
