@@ -2,7 +2,7 @@
   config(
     materialized = 'external',
     location     = gold_path('cash_flow_summary_gold'),
-    format       = 'delta'
+    format       = 'parquet'
   )
 }}
 
@@ -35,12 +35,4 @@ WHERE _is_deleted = FALSE
   AND status = 'POSTED'
 GROUP BY
     company_code, fiscal_year, fiscal_period, posting_month,
-    CASE
-        WHEN doc_type IN ('DZ')         THEN 'INFLOW_AR_COLLECTION'
-        WHEN doc_type IN ('KZ')         THEN 'OUTFLOW_AP_PAYMENT'
-        WHEN doc_type IN ('RV', 'DR')   THEN 'REVENUE_INVOICE'
-        WHEN doc_type IN ('KR', 'RE')   THEN 'PURCHASE_INVOICE'
-        WHEN doc_type IN ('SA')         THEN 'GENERAL_POSTING'
-        WHEN doc_type IN ('WA')         THEN 'GOODS_MOVEMENT'
-        ELSE 'OTHER'
-    END
+    flow_category

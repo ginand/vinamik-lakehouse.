@@ -4,10 +4,12 @@ VinaMilk Lakehouse — Airflow Orchestration DAG
 Lịch chạy: mỗi 15 phút (*/15 * * * *)
 
 Thứ tự thực thi:
-  1. [Silver Batch]  spark-submit silver_batch.py
-                     (Bronze Delta → Silver Delta, MERGE + DQ rules)
-  2. [Gold dbt run]  dbt run --profiles-dir /opt/dbt_gold
-                     (Silver Delta → Gold Delta via DuckDB + dbt-duckdb)
+  1. [Silver Batch]    spark-submit silver_batch.py
+                       (Bronze → Silver, MERGE + DQ rules + Quarantine)
+  2. [DQ Health Check] spark-submit dq_health_check.py
+                       (Kiểm tra quarantine, cảnh báo nếu error rate > 20%)
+  3. [Gold dbt run]    dbt run --profiles-dir /opt/dbt_gold
+                       (Silver → Gold via DuckDB + dbt-duckdb)
 """
 
 import os
@@ -33,16 +35,19 @@ DEFAULT_ARGS = {
 # ─────────────────────────────────────────────────────────
 SPARK_SUBMIT = (
     "/home/airflow/.local/bin/spark-submit"
-    " --master local[*]"
+    " --master local[2]"
+    " --driver-memory 1g"
     " --packages io.delta:delta-spark_2.12:3.2.1,"
                 "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,"
                 "org.apache.hadoop:hadoop-azure:3.3.4"
     " --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension"
     " --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog"
-    " /opt/spark-jobs/silver_batch.py"
+    " /opt/spark-jobs/{script}"
 )
 
 DBT_RUN = (
+    "export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt && "
+    "export SSL_CERT_DIR=/etc/ssl/certs && "
     "/home/airflow/.local/bin/dbt run"
     " --project-dir /opt/dbt_gold"
     " --profiles-dir /opt/dbt_gold"
@@ -53,7 +58,7 @@ DBT_RUN = (
 # DAG
 # ─────────────────────────────────────────────────────────
 with DAG(
-    dag_id="vinamik_lakehouse_pipeline",
+    dag_id="vinamik_erp_lakehouse",
     description="VinaMilk Medallion Lakehouse: Silver (PySpark) → Gold (dbt-duckdb)",
     schedule_interval="*/15 * * * *",       # Mỗi 15 phút
     start_date=datetime(2024, 1, 1),
@@ -65,42 +70,67 @@ with DAG(
 
     start = EmptyOperator(task_id="start")
 
+    # Lấy env vars và loại bỏ dấu nháy kép thừa (nếu có) do docker-compose truyền từ .env
+    azure_acc_name = os.environ.get("AZURE_STORAGE_ACCOUNT_NAME", "").strip('"').strip("'")
+    azure_acc_key = os.environ.get("AZURE_STORAGE_ACCOUNT_KEY", "").strip('"').strip("'")
+    event_hubs_conn = os.environ.get("EVENT_HUBS_CONNECTION_STRING", "").strip('"').strip("'")
+
     # ── Task 1: Silver Batch (PySpark) ──────────────────
     silver_batch = BashOperator(
         task_id="silver_batch",
-        bash_command=SPARK_SUBMIT,
+        bash_command=SPARK_SUBMIT.format(script="silver_batch.py"),
         # Truyền env vars từ Airflow vào process
         env={
-            "AZURE_STORAGE_ACCOUNT_NAME": os.environ.get("AZURE_STORAGE_ACCOUNT_NAME", ""),
-            "AZURE_STORAGE_ACCOUNT_KEY":  os.environ.get("AZURE_STORAGE_ACCOUNT_KEY", ""),
-            "EVENT_HUBS_CONNECTION_STRING": os.environ.get("EVENT_HUBS_CONNECTION_STRING", ""),
+            **os.environ,
+            "AZURE_STORAGE_ACCOUNT_NAME": azure_acc_name,
+            "AZURE_STORAGE_ACCOUNT_KEY":  azure_acc_key,
+            "EVENT_HUBS_CONNECTION_STRING": event_hubs_conn,
         },
         doc_md="""
         ### Silver Batch
         Đọc Bronze Delta tables từ ADLS Gen2, áp dụng Data Quality rules,
-        ghi ngược lại Silver Delta tables bằng MERGE (Upsert).
+        cách ly records lỗi vào quarantine container,
+        chỉ MERGE records sạch vào Silver Delta tables.
         """,
     )
 
-    # ── Task 2: Gold dbt run (dbt-duckdb) ───────────────
+    # ── Task 2: DQ Health Check (PySpark) ───────────────
+    dq_health_check = BashOperator(
+        task_id="dq_health_check",
+        bash_command=SPARK_SUBMIT.format(script="dq_health_check.py"),
+        env={
+            **os.environ,
+            "AZURE_STORAGE_ACCOUNT_NAME": azure_acc_name,
+            "AZURE_STORAGE_ACCOUNT_KEY":  azure_acc_key,
+        },
+        doc_md="""
+        ### Data Quality Health Check
+        Đọc quarantine tables trên ADLS Gen2.
+        Tổng hợp số records lỗi theo bảng và loại lỗi.
+        **FAIL task nếu error rate > 20%** để cảnh báo team.
+        """,
+    )
+
+    # ── Task 3: Gold dbt run (dbt-duckdb) ───────────────
     gold_dbt = BashOperator(
         task_id="gold_dbt_run",
         bash_command=DBT_RUN,
         env={
-            "AZURE_STORAGE_ACCOUNT_NAME": os.environ.get("AZURE_STORAGE_ACCOUNT_NAME", ""),
-            "AZURE_STORAGE_ACCOUNT_KEY":  os.environ.get("AZURE_STORAGE_ACCOUNT_KEY", ""),
-            # DuckDB azure extension dùng connection string
+            **os.environ,
+            "AZURE_STORAGE_ACCOUNT_NAME": azure_acc_name,
+            "AZURE_STORAGE_ACCOUNT_KEY":  azure_acc_key,
             "AZURE_STORAGE_CONNECTION_STRING": (
                 "DefaultEndpointsProtocol=https;"
-                f"AccountName={os.environ.get('AZURE_STORAGE_ACCOUNT_NAME', '')};"
-                f"AccountKey={os.environ.get('AZURE_STORAGE_ACCOUNT_KEY', '')};"
+                f"AccountName={azure_acc_name};"
+                f"AccountKey={azure_acc_key};"
                 "EndpointSuffix=core.windows.net"
             ),
+            "SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt",
         },
         doc_md="""
         ### Gold dbt run
         Chạy toàn bộ dbt models trong dbt_gold/ qua engine DuckDB (in-process).
-        DuckDB đọc Silver Delta trên ADLS Gen2, tính toán 6 bảng KPI Gold,
+        DuckDB đọc Silver Delta trên ADLS Gen2, tính toán 7 bảng KPI Gold,
         ghi lại kết quả xuống Gold container trên ADLS Gen2.
         Models:
           - revenue_by_product_gold
@@ -109,11 +139,12 @@ with DAG(
           - budget_vs_actual_gold
           - gl_trial_balance_gold
           - cash_flow_summary_gold
+          - dq_monitoring_gold   ← Data Quality dashboard
         """,
     )
 
     end = EmptyOperator(task_id="end")
 
     # ── Thứ tự phụ thuộc ────────────────────────────────
-    # start → silver_batch → gold_dbt_run → end
-    start >> silver_batch >> gold_dbt >> end
+    # start → silver_batch → dq_health_check → gold_dbt_run → end
+    start >> silver_batch >> dq_health_check >> gold_dbt >> end

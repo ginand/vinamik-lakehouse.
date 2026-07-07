@@ -7,6 +7,11 @@ vinamik-gold:
         - delta
         - azure
       settings:
-        # Kết nối ADLS Gen2 qua Access Key
-        azure_storage_connection_string: "{{ env_var('AZURE_STORAGE_CONNECTION_STRING', '') }}"
+        # Giới hạn RAM cho DuckDB để tránh gây treo máy (OOM trên WSL)
+        memory_limit: "1GB"
+        # ─── Azure Auth via Account Key (chạy Docker local, không có Managed Identity) ─
+        # Connection string được đọc từ biến môi trường (truyền qua Airflow DAG)
+        # Không hardcode credentials trong file config — tránh lộ khi commit Git
+        azure_storage_connection_string: "{{ env_var('AZURE_STORAGE_CONNECTION_STRING') }}"
   target: dev
+

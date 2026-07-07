@@ -20,7 +20,6 @@ silver/
 gold/
 quarantine/
 *.csv
-*.json
 
 # Spark / Delta Lake
 spark-warehouse/
@@ -28,6 +27,16 @@ metastore_db/
 derby.log
 _delta_log/
 
+# dbt build artifacts
+dbt_gold/target/
+dbt_gold/logs/
+dbt_gold/.user.yml
+
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# Credentials / secrets (safety net — should NEVER be committed)
+*.key
+*.pem
+connectors/*.json

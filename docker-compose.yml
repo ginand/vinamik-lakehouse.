@@ -5,6 +5,32 @@
 # Stack: PostgreSQL (Mock SAP) + Kafka + Debezium + Schema Registry
 # ============================================================
 
+# ─────────────────────────────────────────────────────────
+# YAML ANCHORS — Dùng chung cho 3 Airflow services (DRY)
+# ─────────────────────────────────────────────────────────
+x-airflow-common: &airflow-common
+  build:
+    context: ./airflow
+    dockerfile: Dockerfile
+  env_file:
+    - .env
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    # Dùng IP tĩnh của postgres (172.20.0.10) thay vì hostname để tránh lỗi DNS resolution
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:vinamik%402024@172.20.0.10/airflow_db
+    AIRFLOW__CORE__FERNET_KEY: 'ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg='
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__WEBSERVER__SECRET_KEY: 'vinamik-secret-2024'
+    AZURE_STORAGE_ACCOUNT_NAME: ${AZURE_STORAGE_ACCOUNT_NAME}
+    AZURE_STORAGE_ACCOUNT_KEY: ${AZURE_STORAGE_ACCOUNT_KEY}
+    EVENT_HUBS_CONNECTION_STRING: ${EVENT_HUBS_CONNECTION_STRING}
+  volumes:
+    - airflow_data:/opt/airflow
+    - ./dags:/opt/airflow/dags
+    - ./spark:/opt/spark-jobs
+    - ./dbt_gold:/opt/dbt_gold
+
 services:
 
   # ─────────────────────────────────────────────────────────
@@ -34,11 +60,15 @@ services:
 
   # ─────────────────────────────────────────────────────────
   # 2. KAFKA BROKER — Message Broker (ERP events)
+  # FIX: Thêm mem_limit 1.5GB + tăng start_period lên 90s
+  #      để tránh OOM crash và healthcheck fail sớm
   # ─────────────────────────────────────────────────────────
   kafka:
     image: confluentinc/cp-kafka:7.4.0
     container_name: vinamik-kafka
     hostname: kafka
+    mem_limit: 1536m
+    memswap_limit: 1536m
     depends_on:
       zookeeper:
         condition: service_healthy
@@ -64,14 +94,16 @@ services:
       KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
       KAFKA_MESSAGE_MAX_BYTES: 10485760    # 10MB max message
       KAFKA_NUM_PARTITIONS: 3
+      # JVM heap tường minh để tránh OOM
+      KAFKA_HEAP_OPTS: "-Xmx1g -Xms512m"
     volumes:
       - kafka_data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      test: ["CMD", "bash", "-c", "nc -z localhost 9092"]
       interval: 15s
       timeout: 10s
       retries: 10
-      start_period: 30s
+      start_period: 90s   # Tăng từ 60s → 90s cho JVM warm-up
     restart: unless-stopped
 
   # ─────────────────────────────────────────────────────────
@@ -120,17 +152,21 @@ services:
     environment:
       POSTGRES_DB: vinamik_erp
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: vinamik@2024
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vinamik@2024}   # FIX: Ưu tiên từ .env
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    networks:
+      default:
+        ipv4_address: 172.20.0.10   # IP tĩnh — Airflow kết nối qua IP này, không qua DNS hostname
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d vinamik_erp"]
       interval: 10s
       timeout: 5s
       retries: 10
     restart: unless-stopped
+
 
   # ─────────────────────────────────────────────────────────
   # 5. DEBEZIUM CONNECT — CDC Connector
@@ -177,6 +213,8 @@ services:
 
   # ─────────────────────────────────────────────────────────
   # 6. KAFKA UI — Web UI for monitoring topics & messages
+  # FIX: Bỏ dependency vào debezium-connect (không cần thiết)
+  #      → Giảm thời gian boot ~90 giây
   # Access at http://localhost:8080
   # ─────────────────────────────────────────────────────────
   kafka-ui:
@@ -187,8 +225,6 @@ services:
         condition: service_healthy
       schema-registry:
         condition: service_healthy
-      debezium-connect:
-        condition: service_healthy
     ports:
       - "8080:8080"
     environment:
@@ -197,14 +233,14 @@ services:
       KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
       KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: debezium-connect
       KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://debezium-connect:8083
-      
+
       # Tích hợp Azure Event Hubs Dashboard
       KAFKA_CLUSTERS_1_NAME: azure-cloud-eventhubs
       KAFKA_CLUSTERS_1_BOOTSTRAPSERVERS: vnm-eventhubs-2024.servicebus.windows.net:9093
       KAFKA_CLUSTERS_1_PROPERTIES_SECURITY_PROTOCOL: SASL_SSL
       KAFKA_CLUSTERS_1_PROPERTIES_SASL_MECHANISM: PLAIN
       KAFKA_CLUSTERS_1_PROPERTIES_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="$$ConnectionString" password="${EVENT_HUBS_CONNECTION_STRING}";'
-      
+
       DYNAMIC_CONFIG_ENABLED: 'true'
     restart: unless-stopped
 
@@ -228,7 +264,7 @@ services:
       POSTGRES_PORT: 5432
       POSTGRES_DB: vinamik_erp
       POSTGRES_USER: postgres
-      POSTGRES_PASS: vinamik@2024
+      POSTGRES_PASS: ${POSTGRES_PASSWORD:-vinamik@2024}
       LOG_LEVEL: INFO
     # Speed options: slow | normal | fast | burst
     command: ["python", "generate_erp_data.py", "--speed", "normal"]
@@ -332,29 +368,11 @@ services:
   # 12. AIRFLOW INIT — Khởi tạo database Airflow lần đầu
   # ─────────────────────────────────────────────────────────
   airflow-init:
-    build:
-      context: ./airflow
-      dockerfile: Dockerfile
+    <<: *airflow-common
     container_name: vinamik-airflow-init
     depends_on:
       postgres:
         condition: service_healthy
-    env_file:
-      - .env
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:vinamik%402024@postgres/airflow_db
-      AIRFLOW__CORE__FERNET_KEY: 'ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg='
-      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
-      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-      AZURE_STORAGE_ACCOUNT_NAME: ${AZURE_STORAGE_ACCOUNT_NAME}
-      AZURE_STORAGE_ACCOUNT_KEY: ${AZURE_STORAGE_ACCOUNT_KEY}
-      EVENT_HUBS_CONNECTION_STRING: ${EVENT_HUBS_CONNECTION_STRING}
-    volumes:
-      - airflow_data:/opt/airflow
-      - ./dags:/opt/airflow/dags
-      - ./spark:/opt/spark-jobs
-      - ./dbt_gold:/opt/dbt_gold
     command: >
       bash -c "airflow db migrate && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@vinamik.local"
     restart: on-failure
@@ -363,28 +381,10 @@ services:
   # 13. AIRFLOW SCHEDULER — Đọc DAG, bấm lịch chạy
   # ─────────────────────────────────────────────────────────
   airflow-scheduler:
-    build:
-      context: ./airflow
-      dockerfile: Dockerfile
+    <<: *airflow-common
     container_name: vinamik-airflow-scheduler
     depends_on:
       - airflow-init
-    env_file:
-      - .env
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:vinamik%402024@postgres/airflow_db
-      AIRFLOW__CORE__FERNET_KEY: 'ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg='
-      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
-      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-      AZURE_STORAGE_ACCOUNT_NAME: ${AZURE_STORAGE_ACCOUNT_NAME}
-      AZURE_STORAGE_ACCOUNT_KEY: ${AZURE_STORAGE_ACCOUNT_KEY}
-      EVENT_HUBS_CONNECTION_STRING: ${EVENT_HUBS_CONNECTION_STRING}
-    volumes:
-      - airflow_data:/opt/airflow
-      - ./dags:/opt/airflow/dags
-      - ./spark:/opt/spark-jobs
-      - ./dbt_gold:/opt/dbt_gold
     command: airflow scheduler
     restart: unless-stopped
 
@@ -392,27 +392,10 @@ services:
   # 14. AIRFLOW WEBSERVER — UI theo dõi DAG tại localhost:8888
   # ─────────────────────────────────────────────────────────
   airflow-webserver:
-    build:
-      context: ./airflow
-      dockerfile: Dockerfile
+    <<: *airflow-common
     container_name: vinamik-airflow-webserver
     depends_on:
       - airflow-scheduler
-    env_file:
-      - .env
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:vinamik%402024@postgres/airflow_db
-      AIRFLOW__CORE__FERNET_KEY: 'ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg='
-      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-      AIRFLOW__WEBSERVER__SECRET_KEY: 'vinamik-secret-2024'
-      AZURE_STORAGE_ACCOUNT_NAME: ${AZURE_STORAGE_ACCOUNT_NAME}
-      AZURE_STORAGE_ACCOUNT_KEY: ${AZURE_STORAGE_ACCOUNT_KEY}
-    volumes:
-      - airflow_data:/opt/airflow
-      - ./dags:/opt/airflow/dags
-      - ./spark:/opt/spark-jobs
-      - ./dbt_gold:/opt/dbt_gold
     ports:
       - "8888:8080"      # Airflow UI: http://localhost:8888
     command: airflow webserver
@@ -420,7 +403,6 @@ services:
 
 # ─────────────────────────────────────────────────────────
 # VOLUMES — Persistent data storage
-
 # ─────────────────────────────────────────────────────────
 volumes:
   zookeeper_data:
@@ -443,3 +425,10 @@ networks:
   default:
     name: vinamik-lakehouse-network
     driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: 1450   # Tránh packet fragmentation trong WSL2
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/24             # Subnet tĩnh — IP không đổi sau mỗi restart
+          gateway: 172.20.0.1

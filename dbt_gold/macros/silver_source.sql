@@ -10,6 +10,6 @@
   )
 {% endmacro %}
 
-{% macro gold_path(table_name) %}
-  'abfss://{{ var("gold_container") }}@{{ var("storage_account") }}.dfs.core.windows.net/{{ table_name }}'
-{% endmacro %}
+{% macro gold_path(table_name) -%}
+abfss://{{ var("gold_container") }}@{{ var("storage_account") }}.dfs.core.windows.net/{{ table_name }}.parquet
+{%- endmacro %}

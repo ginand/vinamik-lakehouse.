@@ -2,7 +2,7 @@
   config(
     materialized = 'external',
     location     = gold_path('budget_vs_actual_gold'),
-    format       = 'delta'
+    format       = 'parquet'
   )
 }}
 

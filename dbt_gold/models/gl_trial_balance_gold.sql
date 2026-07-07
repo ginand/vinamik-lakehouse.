@@ -2,7 +2,7 @@
   config(
     materialized = 'external',
     location     = gold_path('gl_trial_balance_gold'),
-    format       = 'delta'
+    format       = 'parquet'
   )
 }}
 

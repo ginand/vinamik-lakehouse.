@@ -1,0 +1,57 @@
+name: VinaMilk Lakehouse CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit_tests:
+    name: PySpark Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with: { python-version: "3.11" }
+      - name: Install dependencies
+        run: pip install pyspark==3.5.3 delta-spark==3.2.1 pytest pytest-cov
+      - name: Run PySpark Tests
+        run: pytest tests/ -v --cov=spark/ --cov-report=xml --cov-fail-under=80
+
+  dbt_tests:
+    name: dbt Model Tests
+    runs-on: ubuntu-latest
+    needs: unit_tests
+    environment: staging
+    steps:
+      - uses: actions/checkout@v3
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with: { python-version: "3.11" }
+      - name: Install dbt
+        run: pip install dbt-duckdb==1.7.0
+      - name: Run dbt Tests
+        run: |
+          cd dbt_gold/
+          dbt deps
+          dbt compile --profiles-dir .
+          dbt test --profiles-dir .
+
+  deploy_production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [unit_tests, dbt_tests]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v3
+      - name: Deploy Airflow DAGs to Azure Blob
+        env:
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+          AZURE_STORAGE_KEY:     ${{ secrets.AZURE_STORAGE_KEY }}
+        run: |
+          az storage blob upload-batch \
+            --account-name $AZURE_STORAGE_ACCOUNT \
+            --account-key  $AZURE_STORAGE_KEY \
+            --destination  airflow-dags \
+            --source       dags/

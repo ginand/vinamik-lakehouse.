@@ -2,7 +2,7 @@
   config(
     materialized = 'external',
     location     = gold_path('revenue_by_product_gold'),
-    format       = 'delta'
+    format       = 'parquet'
   )
 }}
 
@@ -23,7 +23,7 @@ WITH gl AS (
 
 txn AS (
     SELECT txn_id, company_code, fiscal_year, fiscal_period,
-           posting_date, posting_month, currency, status, cost_center
+           posting_date, posting_month, currency, status
     FROM {{ silver_source('transactions_silver') }}
     WHERE _is_deleted = FALSE
       AND status = 'POSTED'

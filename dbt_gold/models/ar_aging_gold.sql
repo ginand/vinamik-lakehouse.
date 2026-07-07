@@ -2,7 +2,7 @@
   config(
     materialized = 'external',
     location     = gold_path('ar_aging_gold'),
-    format       = 'delta'
+    format       = 'parquet'
   )
 }}
 

@@ -52,10 +52,11 @@ def _env(key, default=""):
 
 STORAGE_ACCOUNT   = _env("AZURE_STORAGE_ACCOUNT_NAME", "vmlakehouse2024")
 STORAGE_KEY       = _env("AZURE_STORAGE_ACCOUNT_KEY")
-RUN_INTERVAL_MIN  = int(_env("RUN_INTERVAL_MINUTES", "5"))
+RUN_INTERVAL_MIN  = int(_env("RUN_INTERVAL_MINUTES", "15"))
 
 BRONZE_PATH       = f"abfss://bronze@{STORAGE_ACCOUNT}.dfs.core.windows.net"
 SILVER_PATH       = f"abfss://silver@{STORAGE_ACCOUNT}.dfs.core.windows.net"
+QUARANTINE_PATH   = f"abfss://quarantine@{STORAGE_ACCOUNT}.dfs.core.windows.net"
 CHECKPOINT_PATH   = f"abfss://checkpoints@{STORAGE_ACCOUNT}.dfs.core.windows.net"
 
 if not STORAGE_KEY:
@@ -69,10 +70,11 @@ def create_spark() -> SparkSession:
     spark = (
         SparkSession.builder
         .appName("VinaMilk-Silver-Batch")
-        .config("spark.driver.memory", "2g")
-        .config("spark.executor.memory", "2g")
+        .config("spark.driver.memory", "1g")
+        .config("spark.executor.memory", "1g")
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+        .config("spark.sql.shuffle.partitions", "4") # FIX OOM: Default is 200, which uses too much memory for local micro-batches
         .getOrCreate()
     )
     spark.sparkContext.setLogLevel("WARN")
@@ -212,11 +214,21 @@ VENDOR_PAYLOAD_SCHEMA = StructType([
 ])
 
 FX_PAYLOAD_SCHEMA = StructType([
-    StructField("currency",       StringType()),
-    StructField("rate_vnd",       DoubleType()),
-    StructField("source",         StringType()),
-    StructField("effective_date", StringType()),
-    StructField("fetched_at",     StringType()),
+    # Tên field khớp với fx_rate_producer.py → publish_rates()
+    StructField("currency_pair",     StringType()),   # "VND/USD"
+    StructField("base_currency",     StringType()),   # "VND"
+    StructField("quote_currency",    StringType()),   # "USD" ← đây là 'currency' trong silver
+    StructField("vnd_per_unit",      DoubleType()),   # ← đây là 'rate_vnd' trong silver
+    StructField("rate_date",         StringType()),   # "2026-06-22" ← effective_date
+    StructField("rate_time",         StringType()),
+    StructField("timestamp",         StringType()),   # ← fetched_at
+    StructField("bank_buying_rate",  DoubleType()),
+    StructField("bank_selling_rate", DoubleType()),
+    StructField("sbv_reference",     DoubleType()),
+    StructField("deviation_pct",     DoubleType()),
+    StructField("source",            StringType()),
+    StructField("fiscal_year",       IntegerType()),
+    StructField("fiscal_period",     IntegerType()),
 ])
 
 # ─────────────────────────────────────────────────────────
@@ -224,40 +236,60 @@ FX_PAYLOAD_SCHEMA = StructType([
 # ─────────────────────────────────────────────────────────
 def parse_cdc(df: DataFrame, payload_schema: StructType, after_col: str = "after") -> DataFrame:
     """
-    Debezium CDC envelope (JSON):
-      { "op": "c|u|d|r", "ts_ms": 1234, "before": {...}, "after": {...} }
+    Debezium CDC connector dùng ExtractNewRecordState (unwrap transform) nên payload
+    đã được flatten ra — không có lớp bọc "payload" nữa. Raw JSON có dạng:
+      { ...data_fields..., "__op": "c", "__deleted": "false", "__ts_ms": 123 }
 
-    - op=c (create/insert): after = new row
-    - op=u (update):        after = updated row
-    - op=r (snapshot read): after = existing row (initial snapshot)
-    - op=d (delete):        before = row being deleted, after = null
+    Nếu connector KHÔNG dùng unwrap (raw envelope), format là:
+      { "schema": {...}, "payload": { ...data + meta... } }
 
-    Returns a DataFrame with columns:
-      _cdc_op, _cdc_ts_ms, _is_deleted, _silver_loaded_at + all payload fields
+    Hàm này tự nhận diện: nếu $.payload tồn tại → envelope, ngược lại → flat unwrapped.
     """
-    outer_schema = StructType([
-        StructField("op",     StringType()),
-        StructField("ts_ms",  LongType()),
-        StructField("before", payload_schema),
-        StructField("after",  payload_schema),
+    from pyspark.sql.functions import get_json_object
+
+    # Full schema = data fields + Debezium metadata fields thêm bởi add.fields config
+    payload_with_meta = StructType(payload_schema.fields + [
+        StructField("__op",            StringType()),
+        StructField("__table",         StringType()),
+        StructField("__ts_ms",         LongType()),
+        StructField("__source_ts_ms",  LongType()),
+        StructField("__deleted",       StringType()),
     ])
 
-    return (
-        df
-        .withColumn("_cdc", from_json(col("raw_payload"), outer_schema))
-        .withColumn("_cdc_op",     col("_cdc.op"))
-        .withColumn("_cdc_ts_ms",  col("_cdc.ts_ms"))
-        .withColumn("_is_deleted", col("_cdc.op") == "d")
-        # For deletes use "before", otherwise use "after"
-        .withColumn("_payload",
-            when(col("_cdc.op") == "d", col("_cdc.before"))
-            .otherwise(col("_cdc.after"))
-        )
-        .filter(col("_payload").isNotNull())   # Skip malformed records
-        .select("_cdc_op", "_cdc_ts_ms", "_is_deleted", "_payload")
-        .select("_cdc_op", "_cdc_ts_ms", "_is_deleted", "_payload.*")
+    # Kiểm tra format: thử extract $.payload — nếu null thì là flat (unwrapped)
+    df_detected = df.withColumn("_probe", get_json_object(col("raw_payload"), "$.payload"))
+
+    # Phân luồng: envelope vs flat
+    envelope_df = df_detected.filter(col("_probe").isNotNull())
+    flat_df     = df_detected.filter(col("_probe").isNull())
+
+    # --- Xử lý envelope (có lớp bọc "payload") ---
+    parsed_envelope = (
+        envelope_df
+        .withColumn("_p", from_json(col("_probe"), payload_with_meta))
+        .filter(col("_p").isNotNull())
+        .withColumn("_cdc_op",     coalesce(col("_p.__op"), lit("c")))
+        .withColumn("_cdc_ts_ms",  col("_p.__ts_ms"))
+        .withColumn("_is_deleted", (col("_p.__deleted") == "true") | (col("_p.__op") == "d"))
+        .select("_cdc_op", "_cdc_ts_ms", "_is_deleted", "_p.*")
+        .drop("__op", "__table", "__ts_ms", "__source_ts_ms", "__deleted")
         .withColumn("_silver_loaded_at", current_timestamp())
     )
+
+    # --- Xử lý flat / unwrapped (ExtractNewRecordState đã flatten) ---
+    parsed_flat = (
+        flat_df
+        .withColumn("_p", from_json(col("raw_payload"), payload_with_meta))
+        .filter(col("_p").isNotNull())
+        .withColumn("_cdc_op",     coalesce(col("_p.__op"), lit("c")))
+        .withColumn("_cdc_ts_ms",  col("_p.__ts_ms"))
+        .withColumn("_is_deleted", (col("_p.__deleted") == "true") | (col("_p.__op") == "d"))
+        .select("_cdc_op", "_cdc_ts_ms", "_is_deleted", "_p.*")
+        .drop("__op", "__table", "__ts_ms", "__source_ts_ms", "__deleted")
+        .withColumn("_silver_loaded_at", current_timestamp())
+    )
+
+    return parsed_envelope.unionByName(parsed_flat)
 
 
 def epoch_days_to_date(col_name: str):
@@ -334,6 +366,19 @@ def transform_ar(df: DataFrame) -> DataFrame:
             .when(col("overdue_days") <= 90, lit("61_90_DAYS"))
             .otherwise(lit("OVER_90_DAYS"))
         )
+        # DQ flags — Kiểm tra chất lượng dữ liệu công nợ phải thu
+        .withColumn("dq_null_customer",  col("customer_id").isNull())
+        .withColumn("dq_negative_amount", col("amount") < 0)
+        .withColumn("dq_invalid_status",
+            ~col("status").isin("OPEN", "PARTIAL", "PAID", "OVERDUE", "DISPUTED"))
+        .withColumn("dq_future_invoice",
+            col("invoice_date") > current_timestamp().cast("date"))
+        .withColumn("dq_paid_exceeds_amount",
+            coalesce(col("paid_amount"), lit(0.0)) > col("amount"))
+        .withColumn("dq_is_clean",
+            ~col("dq_null_customer") & ~col("dq_negative_amount")
+            & ~col("dq_invalid_status") & ~col("dq_future_invoice")
+            & ~col("dq_paid_exceeds_amount"))
         .withColumn("invoice_month", col("invoice_date").cast(StringType()).substr(1, 7))
     )
 
@@ -357,6 +402,19 @@ def transform_ap(df: DataFrame) -> DataFrame:
             .when(col("overdue_days") <= 90, lit("61_90_DAYS"))
             .otherwise(lit("OVER_90_DAYS"))
         )
+        # DQ flags — Kiểm tra chất lượng dữ liệu công nợ phải trả
+        .withColumn("dq_null_vendor",    col("vendor_id").isNull())
+        .withColumn("dq_negative_amount", col("amount") < 0)
+        .withColumn("dq_invalid_status",
+            ~col("status").isin("OPEN", "PARTIAL", "PAID", "OVERDUE"))
+        .withColumn("dq_future_invoice",
+            col("invoice_date") > current_timestamp().cast("date"))
+        .withColumn("dq_paid_exceeds_amount",
+            coalesce(col("paid_amount"), lit(0.0)) > col("amount"))
+        .withColumn("dq_is_clean",
+            ~col("dq_null_vendor") & ~col("dq_negative_amount")
+            & ~col("dq_invalid_status") & ~col("dq_future_invoice")
+            & ~col("dq_paid_exceeds_amount"))
         .withColumn("invoice_month", col("invoice_date").cast(StringType()).substr(1, 7))
     )
 
@@ -372,25 +430,135 @@ def transform_vendors(df: DataFrame) -> DataFrame:
 
 
 def transform_fx_rates(df: DataFrame) -> DataFrame:
-    """FX rates come from custom producer (flat JSON, no CDC envelope)."""
+    """FX rates come from custom producer (flat JSON, no CDC envelope).
+    No Debezium CDC wrapper → no _is_deleted / _cdc_op fields.
+    Map producer field names → silver column names:
+      quote_currency → currency
+      vnd_per_unit   → rate_vnd
+      rate_date      → effective_date
+      timestamp      → fetched_at
+    """
     return (
         df
         .withColumn("_fx", from_json(col("raw_payload"), FX_PAYLOAD_SCHEMA))
+        .filter(col("_fx").isNotNull())
         .select(
-            col("_fx.currency").alias("currency"),
-            col("_fx.rate_vnd").alias("rate_vnd"),
-            col("_fx.source").alias("source"),
-            col("_fx.effective_date").alias("effective_date"),
-            col("_fx.fetched_at").alias("fetched_at"),
+            col("_fx.quote_currency").alias("currency"),        # USD, EUR, JPY, SGD
+            col("_fx.vnd_per_unit").alias("rate_vnd"),          # VND per 1 unit
+            col("_fx.rate_date").alias("effective_date"),        # YYYY-MM-DD
+            col("_fx.timestamp").alias("fetched_at"),           # ISO timestamp
+            col("_fx.source").alias("source"),                  # SBV_MOCK / EXCHANGERATE_API
+            col("_fx.bank_buying_rate").alias("bank_buying_rate"),
+            col("_fx.bank_selling_rate").alias("bank_selling_rate"),
+            col("_fx.sbv_reference").alias("sbv_reference"),
+            col("_fx.deviation_pct").alias("deviation_pct"),
+            col("_fx.fiscal_year").alias("fiscal_year"),
+            col("_fx.fiscal_period").alias("fiscal_period"),
             current_timestamp().alias("_silver_loaded_at"),
+            lit(False).alias("_is_deleted"),   # FX producer không có CDC delete
         )
         .filter(col("currency").isNotNull() & col("rate_vnd").isNotNull())
     )
 
 
 # ─────────────────────────────────────────────────────────
+# DATA QUALITY — Quarantine Logic
+# Tách records lỗi (dq_is_clean = FALSE) ra khỏi Silver,
+# ghi vào bảng quarantine với metadata đầy đủ để debug.
+# ─────────────────────────────────────────────────────────
+
+# Map DQ flag columns → (error_type, error_column)
+DQ_FLAG_MAP = {
+    # Transactions
+    "dq_future_posting":      ("FUTURE_POSTING_DATE",  "posting_date"),
+    "dq_amount_zero":         ("AMOUNT_ZERO",          "total_debit/total_credit"),
+    "dq_wrong_currency":      ("INVALID_CURRENCY",     "currency"),
+    # General Ledger
+    "dq_missing_cost_center": ("MISSING_COST_CENTER",  "cost_center"),
+    "dq_negative_amount":     ("NEGATIVE_AMOUNT",      "amount"),
+    # AR
+    "dq_null_customer":       ("NULL_CUSTOMER_ID",     "customer_id"),
+    "dq_invalid_status":      ("INVALID_STATUS",       "status"),
+    "dq_future_invoice":      ("FUTURE_INVOICE_DATE",  "invoice_date"),
+    "dq_paid_exceeds_amount": ("PAID_EXCEEDS_AMOUNT",  "paid_amount"),
+    # AP
+    "dq_null_vendor":         ("NULL_VENDOR_ID",       "vendor_id"),
+}
+
+
+def quarantine_and_filter(
+    spark: SparkSession,
+    silver_df: DataFrame,
+    source_table: str,
+    pk_col: str,
+) -> tuple:
+    """
+    Tách records lỗi (dq_is_clean = FALSE) ra khỏi DataFrame.
+    Records lỗi được ghi vào bảng quarantine trên ADLS Gen2
+    với metadata đầy đủ: _error_type, _error_column, _quarantined_at, _source_table.
+
+    Returns: (clean_df, quarantine_count)
+    """
+    # Nếu bảng không có DQ flags (customers, vendors, fx_rates) → trả về nguyên bản
+    if "dq_is_clean" not in silver_df.columns:
+        return silver_df, 0
+
+    clean_df      = silver_df.filter(col("dq_is_clean") == True)
+    quarantine_df = silver_df.filter(col("dq_is_clean") == False)
+
+    q_count = quarantine_df.count()
+    if q_count == 0:
+        return clean_df, 0
+
+    # ── Xác định loại lỗi từ DQ flags ──
+    # Ưu tiên lỗi nghiêm trọng trước (first match)
+    error_type_expr = lit("UNKNOWN")
+    error_col_expr  = lit("unknown")
+
+    for flag_col, (err_type, err_column) in DQ_FLAG_MAP.items():
+        if flag_col in quarantine_df.columns:
+            error_type_expr = when(col(flag_col) == True, lit(err_type)).otherwise(error_type_expr)
+            error_col_expr  = when(col(flag_col) == True, lit(err_column)).otherwise(error_col_expr)
+
+    quarantine_with_meta = (
+        quarantine_df
+        .withColumn("_error_type",     error_type_expr)
+        .withColumn("_error_column",   error_col_expr)
+        .withColumn("_quarantined_at", current_timestamp())
+        .withColumn("_source_table",   lit(source_table))
+    )
+
+    # ── Ghi vào quarantine container trên ADLS Gen2 (APPEND) ──
+    quarantine_path = f"{QUARANTINE_PATH}/{source_table}"
+    try:
+        (
+            quarantine_with_meta.write
+            .format("delta")
+            .mode("append")
+            .option("mergeSchema", "true")
+            .save(quarantine_path)
+        )
+        logger.info(f"    🔴 {q_count} records → quarantine/{source_table}")
+    except Exception as e:
+        # Quarantine ghi thất bại không nên block pipeline chính
+        logger.warning(f"    ⚠️  Không thể ghi quarantine/{source_table}: {e}")
+        logger.warning(f"    (Records lỗi vẫn bị loại khỏi Silver, nhưng không lưu quarantine)")
+
+    return clean_df, q_count
+
+
+# ─────────────────────────────────────────────────────────
 # MERGE INTO SILVER (UPSERT for CDC correctness)
 # ─────────────────────────────────────────────────────────
+_TABLE_NOT_FOUND_HINTS = (
+    "is not a Delta table",
+    "doesn't exist",
+    "Path does not exist",
+    "No such file or directory",
+    "DELTA_TABLE_NOT_FOUND",
+    "DELTA_MISSING_TRANSACTION_LOG",
+)
+
 def merge_into_silver(
     spark: SparkSession,
     new_df: DataFrame,
@@ -400,6 +568,7 @@ def merge_into_silver(
     """
     MERGE new_df into Silver Delta table at silver_table_path.
     Handles INSERT, UPDATE, and soft-DELETE via _is_deleted flag.
+    Chỉ tạo mới bảng khi bảng thực sự chưa tồn tại — không nuốt lỗi khác.
     """
     try:
         existing = DeltaTable.forPath(spark, silver_table_path)
@@ -417,14 +586,20 @@ def merge_into_silver(
             .whenNotMatchedInsertAll()
             .execute()
         )
-    except Exception:
-        # Table does not exist yet — create it
-        (
-            new_df.write
-            .format("delta")
-            .mode("overwrite")
-            .save(silver_table_path)
-        )
+    except Exception as exc:
+        err_msg = str(exc)
+        if any(hint in err_msg for hint in _TABLE_NOT_FOUND_HINTS):
+            # Bảng chưa tồn tại → tạo mới
+            logger.info(f"    ℹ️  Silver table chưa có → tạo mới: {silver_table_path}")
+            (
+                new_df.write
+                .format("delta")
+                .mode("overwrite")
+                .save(silver_table_path)
+            )
+        else:
+            # Lỗi thực sự (schema mismatch, ADLS auth, v.v.) → re-raise
+            raise
 
 
 # ─────────────────────────────────────────────────────────
@@ -486,41 +661,131 @@ PIPELINE = [
 # ─────────────────────────────────────────────────────────
 # MAIN BATCH LOOP
 # ─────────────────────────────────────────────────────────
+def _bronze_table_is_ready(spark: SparkSession, bronze_path: str, table_name: str) -> bool:
+    """
+    Kiểm tra Bronze Delta table đã tồn tại và có ít nhất 1 record chưa.
+    Tránh lỗi DELTA_SCHEMA_NOT_SET khi table còn rỗng hoặc chưa được tạo.
+    """
+    try:
+        count = spark.read.format("delta").load(bronze_path).limit(1).count()
+        if count == 0:
+            logger.info(f"  ⏭  {table_name}: Bronze table rỗng — bỏ qua lần này")
+            return False
+        return True
+    except Exception as e:
+        err_msg = str(e)
+        schema_errors = (
+            "DELTA_SCHEMA_NOT_SET",
+            "Table schema is not set",
+            "Path does not exist",
+            "is not a Delta table",
+            "doesn't exist",
+            "No such file or directory",
+        )
+        if any(hint in err_msg for hint in schema_errors):
+            logger.info(f"  ⏭  {table_name}: Bronze table chưa có dữ liệu ({type(e).__name__}) — bỏ qua")
+            return False
+        # Lỗi khác (auth, network) → re-raise
+        raise
+
+
 def run_silver_batch(spark: SparkSession):
     run_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    logger.info(f"═══════ Silver Batch Run @ {run_ts} ═══════")
+    logger.info(f"═══════ Silver Incremental Batch Run @ {run_ts} ═══════")
     success, skipped, failed = 0, 0, 0
 
-    for cfg in PIPELINE:
+    def process_cfg(cfg):
         bronze_path = f"{BRONZE_PATH}/{cfg['bronze']}"
         silver_path = f"{SILVER_PATH}/{cfg['silver']}"
+        chk_dir = f"{CHECKPOINT_PATH}/silver_incremental_v2_{cfg['silver']}"
+
+        if not _bronze_table_is_ready(spark, bronze_path, cfg['bronze']):
+            return None, cfg['silver']
+
+        def process_micro_batch(micro_df: DataFrame, batch_id: int):
+            silver_df = cfg["transform"](micro_df)
+            
+            from pyspark.sql.window import Window
+            from pyspark.sql.functions import row_number, col, desc
+            sort_col = "_cdc_ts_ms" if "_cdc_ts_ms" in silver_df.columns else "_silver_loaded_at"
+            windowSpec = Window.partitionBy(cfg["pk"]).orderBy(desc(sort_col))
+            silver_df = silver_df.withColumn("_rn", row_number().over(windowSpec)) \
+                                 .filter(col("_rn") == 1) \
+                                 .drop("_rn")
+                                 
+            silver_df.persist()
+            try:
+                has_deleted_col = "_is_deleted" in silver_df.columns
+                if has_deleted_col:
+                    active_df  = silver_df.filter(col("_is_deleted") == False)
+                    deleted_df = silver_df.filter(col("_is_deleted") == True)
+                else:
+                    active_df  = silver_df
+                    deleted_df = silver_df.filter(lit(False))
+
+                del_count = deleted_df.count()
+
+                # ── Data Quality: tách records lỗi vào quarantine ──
+                clean_df, q_count = quarantine_and_filter(
+                    spark, active_df, cfg["silver"], cfg["pk"]
+                )
+
+                out_count = clean_df.count()
+                in_count  = out_count + del_count + q_count
+
+                if in_count > 0:
+                    logger.info(f"    [Batch {batch_id}] {in_count} records → {cfg['silver']}")
+                    # Merge: clean records + deleted records (soft-delete)
+                    merge_df = clean_df.unionByName(deleted_df, allowMissingColumns=True) \
+                        if del_count > 0 else clean_df
+                    merge_into_silver(spark, merge_df, silver_path, cfg["pk"])
+                    logger.info(
+                        f"    ✅ [Batch {batch_id}] {in_count} bronze → "
+                        f"{out_count} silver | {q_count} quarantined | {del_count} deleted"
+                    )
+                else:
+                    logger.info(f"    [Batch {batch_id}] 0 records → {cfg['silver']}")
+            finally:
+                silver_df.unpersist()
 
         try:
-            logger.info(f"  ▶ {cfg['bronze']} → {cfg['silver']}")
+            logger.info(f"  ▶ {cfg['bronze']} → {cfg['silver']} (Incremental)")
 
-            bronze_df = spark.read.format("delta").load(bronze_path)
-            if bronze_df.rdd.isEmpty():
-                logger.info(f"    ℹ️  Bronze table empty — skip")
-                skipped += 1
-                continue
-
-            silver_df = cfg["transform"](bronze_df)
-
-            # Remove deleted records from Silver for physical cleanup (optional)
-            clean_df = silver_df.filter(col("_is_deleted") == False)  # noqa: E712
-            deleted_df = silver_df.filter(col("_is_deleted") == True)  # noqa: E712
-
-            merge_into_silver(spark, silver_df, silver_path, cfg["pk"])
-
-            in_count  = bronze_df.count()
-            out_count = clean_df.count()
-            del_count = deleted_df.count()
-            logger.info(f"    ✅ {in_count} bronze → {out_count} silver (deleted: {del_count})")
-            success += 1
+            query = (
+                spark.readStream.format("delta")
+                .load(bronze_path)
+                .writeStream
+                .foreachBatch(process_micro_batch)
+                .option("checkpointLocation", chk_dir)
+                .trigger(availableNow=True)
+                .start()
+            )
+            query.awaitTermination()
+            return True, cfg['silver']
 
         except Exception as e:
             logger.warning(f"    ⚠️  {cfg['bronze']}: {type(e).__name__}: {e}")
-            failed += 1
+            return False, cfg['silver']
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    with ThreadPoolExecutor(max_workers=7) as executor:
+        futures = []
+        for cfg in PIPELINE:
+            futures.append(executor.submit(process_cfg, cfg))
+            
+        for future in as_completed(futures):
+            try:
+                res_success, table = future.result()
+                if res_success is True:
+                    success += 1
+                elif res_success is False:
+                    failed += 1
+                else:
+                    skipped += 1
+            except Exception as e:
+                logger.warning(f"⚠️ Worker error: {e}")
+                failed += 1
 
     logger.info(f"═══════ Done: {success} OK | {skipped} skipped | {failed} failed ═══════\n")
 
@@ -539,3 +804,4 @@ if __name__ == "__main__":
         sys.exit(1)
 
     logger.info("✅ Silver Batch finished — exiting cleanly for Airflow")
+

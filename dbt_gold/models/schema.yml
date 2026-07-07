@@ -1,0 +1,162 @@
+version: 2
+
+models:
+  # ── KPI 1: Doanh thu theo sản phẩm ──────────────────────
+  - name: revenue_by_product_gold
+    description: "Doanh thu theo dòng sản phẩm, tổng hợp từ GL (tài khoản 511x) + Transactions"
+    columns:
+      - name: product_line
+        description: "Mã nhóm sản phẩm (4 ký tự đầu account_id: 5111-5115)"
+        tests:
+          - not_null
+      - name: posting_month
+        description: "Tháng ghi nhận doanh thu (YYYY-MM)"
+        tests:
+          - not_null
+      - name: revenue_vnd
+        description: "Doanh thu tổng theo VND"
+        tests:
+          - not_null
+      - name: num_transactions
+        tests:
+          - not_null
+
+  # ── KPI 2: Công nợ phải thu (AR Aging) ──────────────────
+  - name: ar_aging_gold
+    description: "Công nợ phải thu phân loại theo nhóm tuổi nợ (aging bucket), join với customers"
+    columns:
+      - name: customer_id
+        description: "Mã khách hàng"
+        tests:
+          - not_null
+      - name: aging_bucket
+        description: "Nhóm tuổi nợ"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['CURRENT', '1_30_DAYS', '31_60_DAYS', '61_90_DAYS', 'OVER_90_DAYS', 'PAID']
+      - name: total_outstanding_vnd
+        description: "Tổng dư nợ chưa thu (VND)"
+        tests:
+          - not_null
+      - name: invoice_month
+        tests:
+          - not_null
+
+  # ── KPI 3: Công nợ phải trả (AP Aging) ──────────────────
+  - name: ap_aging_gold
+    description: "Công nợ phải trả phân loại theo nhóm tuổi nợ, join với vendors"
+    columns:
+      - name: vendor_id
+        description: "Mã nhà cung cấp"
+        tests:
+          - not_null
+      - name: aging_bucket
+        description: "Nhóm tuổi nợ"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['CURRENT', '1_30_DAYS', '31_60_DAYS', '61_90_DAYS', 'OVER_90_DAYS', 'PAID']
+      - name: total_outstanding_vnd
+        description: "Tổng dư nợ chưa trả (VND)"
+        tests:
+          - not_null
+
+  # ── KPI 4: Ngân sách vs Thực tế ─────────────────────────
+  - name: budget_vs_actual_gold
+    description: "So sánh chi phí thực tế (GL debit 6xx/7xx) với ngân sách kế hoạch"
+    columns:
+      - name: cost_center
+        description: "Mã trung tâm chi phí"
+        tests:
+          - not_null
+      - name: fiscal_year
+        tests:
+          - not_null
+      - name: fiscal_period
+        tests:
+          - not_null
+      - name: variance_vnd
+        description: "Chênh lệch: actual - budget (dương = vượt ngân sách)"
+        tests:
+          - not_null
+      - name: status_flag
+        tests:
+          - accepted_values:
+              values: ['ON_TRACK', 'OVER_BUDGET', 'UNDER_BUDGET']
+
+  # ── KPI 5: Bảng cân đối số phát sinh (Trial Balance) ────
+  - name: gl_trial_balance_gold
+    description: "Cân đối phát sinh Nợ/Có theo tài khoản kế toán + kỳ kế toán"
+    columns:
+      - name: account_id
+        description: "Mã tài khoản kế toán"
+        tests:
+          - not_null
+      - name: fiscal_year
+        tests:
+          - not_null
+      - name: total_debit_vnd
+        description: "Tổng phát sinh Nợ (VND)"
+        tests:
+          - not_null
+      - name: total_credit_vnd
+        description: "Tổng phát sinh Có (VND)"
+        tests:
+          - not_null
+      - name: net_balance_vnd
+        description: "Số dư thuần = Nợ - Có"
+        tests:
+          - not_null
+
+  # ── KPI 6: Tóm tắt dòng tiền (Cash Flow) ───────────────
+  - name: cash_flow_summary_gold
+    description: "Dòng tiền thu chi phân loại theo doc_type SAP (DZ, KZ, RV, KR...)"
+    columns:
+      - name: company_code
+        tests:
+          - not_null
+      - name: posting_month
+        description: "Tháng giao dịch (YYYY-MM)"
+        tests:
+          - not_null
+      - name: flow_category
+        description: "Loại dòng tiền"
+        tests:
+          - not_null
+          - accepted_values:
+              values:
+                - 'INFLOW_AR_COLLECTION'
+                - 'OUTFLOW_AP_PAYMENT'
+                - 'REVENUE_INVOICE'
+                - 'PURCHASE_INVOICE'
+                - 'GENERAL_POSTING'
+                - 'GOODS_MOVEMENT'
+                - 'OTHER'
+      - name: total_debit_vnd
+        tests:
+          - not_null
+      - name: total_credit_vnd
+        tests:
+          - not_null
+
+  # ── KPI 7: Data Quality Monitoring ──────────────────────
+  - name: dq_monitoring_gold
+    description: "Thống kê lỗi từ quarantine tables — dùng cho Power BI Data Quality Monitor page"
+    columns:
+      - name: source_table
+        description: "Tên bảng nguồn (transactions, ar, ap, general_ledger)"
+        tests:
+          - not_null
+      - name: error_type
+        description: "Loại lỗi DQ (NULL_CUSTOMER_ID, NEGATIVE_AMOUNT...)"
+        tests:
+          - not_null
+      - name: quarantine_date
+        description: "Ngày xảy ra lỗi"
+        tests:
+          - not_null
+      - name: error_count
+        description: "Số records lỗi"
+        tests:
+          - not_null

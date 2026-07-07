@@ -17,6 +17,16 @@ vars:
   silver_container: "silver"
   gold_container: "gold"
 
+# ─── Tạo Azure Secret cho delta-kernel-rs trước khi chạy models ───────────
+# delta extension dùng delta-kernel-rs (Rust), không đọc DuckDB settings.
+# Phải tạo SECRET để delta_scan() có thể xác thực với ADLS Gen2.
+on-run-start:
+  - "SET CA_CERT_FILE='/etc/ssl/certs/ca-certificates.crt';"
+  - "CREATE OR REPLACE SECRET vinamik_azure_secret (
+        TYPE AZURE,
+        CONNECTION_STRING '{{ env_var(\"AZURE_STORAGE_CONNECTION_STRING\") }}'
+     );"
+
 models:
   vinamik_gold:
     +materialized: external   # Ghi file Delta ra ADLS Gen2 thay vì bảng DuckDB tạm
