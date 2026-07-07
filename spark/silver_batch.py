@@ -50,18 +50,29 @@ def _env(key, default=""):
     val = os.getenv(key, default)
     return val.strip('"').strip("'") if val else val
 
+# Khi chạy unit test (PYTEST_CURRENT_TEST được set tự động bởi pytest)
+# thì KHÔNG cần kết nối ADLS thực, dùng path local.
+_TESTING = os.getenv("PYTEST_CURRENT_TEST") is not None or os.getenv("CI_TESTING") == "1"
+
 STORAGE_ACCOUNT   = _env("AZURE_STORAGE_ACCOUNT_NAME", "vmlakehouse2024")
 STORAGE_KEY       = _env("AZURE_STORAGE_ACCOUNT_KEY")
 RUN_INTERVAL_MIN  = int(_env("RUN_INTERVAL_MINUTES", "15"))
 
-BRONZE_PATH       = f"abfss://bronze@{STORAGE_ACCOUNT}.dfs.core.windows.net"
-SILVER_PATH       = f"abfss://silver@{STORAGE_ACCOUNT}.dfs.core.windows.net"
-QUARANTINE_PATH   = f"abfss://quarantine@{STORAGE_ACCOUNT}.dfs.core.windows.net"
-CHECKPOINT_PATH   = f"abfss://checkpoints@{STORAGE_ACCOUNT}.dfs.core.windows.net"
-
-if not STORAGE_KEY:
-    logger.error("❌ Thiếu AZURE_STORAGE_ACCOUNT_KEY — kiểm tra .env")
-    sys.exit(1)
+if _TESTING:
+    # Dùng path local tạm trong unit test
+    _BASE = "/tmp/vinamik_test"
+    BRONZE_PATH     = f"{_BASE}/bronze"
+    SILVER_PATH     = f"{_BASE}/silver"
+    QUARANTINE_PATH = f"{_BASE}/quarantine"
+    CHECKPOINT_PATH = f"{_BASE}/checkpoints"
+else:
+    BRONZE_PATH     = f"abfss://bronze@{STORAGE_ACCOUNT}.dfs.core.windows.net"
+    SILVER_PATH     = f"abfss://silver@{STORAGE_ACCOUNT}.dfs.core.windows.net"
+    QUARANTINE_PATH = f"abfss://quarantine@{STORAGE_ACCOUNT}.dfs.core.windows.net"
+    CHECKPOINT_PATH = f"abfss://checkpoints@{STORAGE_ACCOUNT}.dfs.core.windows.net"
+    if not STORAGE_KEY:
+        logger.error("❌ Thiếu AZURE_STORAGE_ACCOUNT_KEY — kiểm tra .env")
+        sys.exit(1)
 
 # ─────────────────────────────────────────────────────────
 # SPARK SESSION
