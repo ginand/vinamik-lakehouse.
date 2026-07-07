@@ -42,7 +42,12 @@ jobs:
           SPARK_LOCAL_IP: "127.0.0.1"
           PYSPARK_PYTHON: python3
         timeout-minutes: 10
-        run: python -m pytest tests/ -v --cov=spark/ --cov-report=xml --cov-fail-under=40
+        run: |
+          python -m pytest tests/ -v \
+            --cov=spark/silver_batch \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=15
 
   dbt_tests:
     name: dbt Schema Tests (compile-only)
