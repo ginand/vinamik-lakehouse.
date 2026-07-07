@@ -86,8 +86,17 @@ jobs:
           AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
           AZURE_STORAGE_KEY:     ${{ secrets.AZURE_STORAGE_KEY }}
         run: |
+          # Create container if it doesn't exist
+          az storage container create \
+            --name airflow-dags \
+            --account-name $AZURE_STORAGE_ACCOUNT \
+            --account-key $AZURE_STORAGE_KEY \
+            --output none || true
+
+          # Upload all DAGs
           az storage blob upload-batch \
             --account-name $AZURE_STORAGE_ACCOUNT \
             --account-key  $AZURE_STORAGE_KEY \
             --destination  airflow-dags \
             --source       dags/
+
