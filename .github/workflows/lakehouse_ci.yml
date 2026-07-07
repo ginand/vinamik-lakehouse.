@@ -44,7 +44,7 @@ jobs:
         timeout-minutes: 10
         run: |
           python -m pytest tests/ -v \
-            --cov=spark/silver_batch \
+            --cov=spark \
             --cov-report=xml \
             --cov-report=term-missing \
             --cov-fail-under=15
