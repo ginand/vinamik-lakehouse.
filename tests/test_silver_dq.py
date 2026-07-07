@@ -209,14 +209,14 @@ class TestTransactionDQRules:
         row = result.collect()[0]
         # posting_date sau transform phải là date object, không phải int
         assert row["posting_date"] is not None
-        assert str(row["posting_date"]) == "2024-09-16"
+        assert str(row["posting_date"]) == "2024-10-04"
 
     def test_posting_month_derived_column(self, spark):
         """posting_month phải được tạo ra với format YYYY-MM."""
         df = make_bronze(spark, [_txn(posting_date=20000)])
         result = sb.transform_transactions(df)
         row = result.collect()[0]
-        assert row["posting_month"] == "2024-09"
+        assert row["posting_month"] == "2024-10"
 
 
 # ─────────────────────────────────────────────────────────
@@ -483,22 +483,22 @@ class TestDateHelpers:
 
     def test_epoch_days_zero_is_1970(self, spark):
         """epoch_days=0 → 1970-01-01."""
-        df = make_bronze(spark, [_gl()])
-        # Tạo DataFrame có cột int đơn giản để test helper
-        test_df = spark.createDataFrame([(0,)], ["epoch_days"])
+        # Dùng IntegerType để tránh BIGINT mismatch với date_add()
+        from pyspark.sql.types import IntegerType as IT
+        test_df = spark.createDataFrame([(0,)], StructType([StructField("epoch_days", IT())]))
         from pyspark.sql.functions import expr
         result = test_df.withColumn(
             "converted",
-            expr("date_add(date '1970-01-01', `epoch_days`)")
+            expr("date_add(date '1970-01-01', epoch_days)")
         ).collect()[0]["converted"]
         assert str(result) == "1970-01-01"
 
     def test_epoch_days_20000_is_2024(self, spark):
-        """epoch_days=20000 → 2024-09-16."""
+        """epoch_days=20000 → 2024-10-04 (kiểm tra date parsing)."""
         df = make_bronze(spark, [_txn(posting_date=20000)])
         result = sb.transform_transactions(df)
         row = result.collect()[0]
-        assert str(row["posting_date"]) == "2024-09-16"
+        assert str(row["posting_date"]) == "2024-10-04"
 
     def test_epoch_micros_conversion(self, spark):
         """Epoch microseconds phải chuyển thành timestamp hợp lệ."""
