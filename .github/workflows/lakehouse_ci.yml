@@ -20,6 +20,14 @@ jobs:
           distribution: temurin
           java-version: "11"
 
+      # Cache Maven để tránh re-download Delta JARs mỗi lần CI chạy
+      - name: Cache Maven repository
+        uses: actions/cache@v3
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-delta-3.2.1
+          restore-keys: ${{ runner.os }}-maven-
+
       - uses: actions/setup-python@v4
         with: { python-version: "3.11" }
 
@@ -33,6 +41,7 @@ jobs:
           JAVA_HOME: ${{ env.JAVA_HOME }}
           SPARK_LOCAL_IP: "127.0.0.1"
           PYSPARK_PYTHON: python3
+        timeout-minutes: 10
         run: python -m pytest tests/ -v --cov=spark/ --cov-report=xml --cov-fail-under=80
 
   dbt_tests:
