@@ -1,32 +1,23 @@
 """
-VinaMilk Data Lakehouse — Budget Plan Producer
-===============================================
-Giả lập Google Sheets Finance Planning cho phòng kế hoạch tài chính VinaMilk.
-
-Real process:
-  - Phòng KH-TC duy trì Google Sheets chứa ngân sách kế hoạch + forecast hàng tháng
-  - Producer dùng gspread poll mỗi 5 phút, chỉ đẩy Kafka khi có thay đổi
-  - Topic: erp.budget_plan  (retention 30 ngày)
-
-Mock mode (không cần Google API):
-  - Sinh dữ liệu ngân sách theo format thực tế
-  - Poll mỗi 5 phút, mỗi lần random cập nhật 1-3 dòng (simulate user chỉnh số)
+VinaMilk Data Lakehouse — Budget Plan Producer (Real API Integration)
+=====================================================================
+Lấy dữ liệu thật từ Google Sheets do phòng kế toán - tài chính nhập liệu.
+Sử dụng Google Service Account (credentials.json) để đọc dữ liệu qua API.
 
 Run:
   python budget_plan_producer.py              # one-shot
   python budget_plan_producer.py --loop       # loop mỗi 5 phút
-  python budget_plan_producer.py --backfill   # sinh đủ 12 tháng
 """
 
 import os
 import json
 import time
-import random
 import logging
 import argparse
 import hashlib
-from datetime import datetime, date
-from dateutil.relativedelta import relativedelta
+from datetime import datetime
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 try:
     from kafka import KafkaProducer
@@ -47,207 +38,134 @@ logger = logging.getLogger("vinamik.budget_producer")
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 KAFKA_TOPIC     = "erp.budget_plan"
 POLL_INTERVAL   = int(os.getenv("BUDGET_POLL_INTERVAL", "300"))  # 5 phút
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
+CREDENTIALS_FILE = "credentials.json"
 
-# VinaMilk cost centers & channels
-COST_CENTERS = [
-    {"code": "CC-KD01", "name": "Kênh MT (Modern Trade)",       "division": "Sales"},
-    {"code": "CC-KD02", "name": "Kênh GT (General Trade)",      "division": "Sales"},
-    {"code": "CC-KD03", "name": "Kênh Export",                  "division": "Sales"},
-    {"code": "CC-KD04", "name": "Kênh Online / E-commerce",     "division": "Sales"},
-    {"code": "CC-MKT1", "name": "Marketing & Brand",            "division": "Marketing"},
-    {"code": "CC-MKT2", "name": "Digital Marketing",            "division": "Marketing"},
-    {"code": "CC-SX01", "name": "Nhà máy Thống Nhất",          "division": "Production"},
-    {"code": "CC-SX02", "name": "Nhà máy Đà Lạt",              "division": "Production"},
-    {"code": "CC-SX03", "name": "Nhà máy Tiên Sơn",            "division": "Production"},
-    {"code": "CC-HC01", "name": "Hành chính - Nhân sự",         "division": "Admin"},
-    {"code": "CC-HC02", "name": "Tài chính - Kế toán",          "division": "Finance"},
-    {"code": "CC-HC03", "name": "Công nghệ thông tin",          "division": "IT"},
-    {"code": "CC-RD01", "name": "Nghiên cứu & Phát triển",     "division": "R&D"},
-    {"code": "CC-SC01", "name": "Chuỗi cung ứng - Logistics",  "division": "Supply Chain"},
-    {"code": "CC-SC02", "name": "Procurement & Sourcing",       "division": "Supply Chain"},
-    {"code": "CC-QA01", "name": "Kiểm soát chất lượng (QA)",   "division": "Quality"},
-]
-
-# Budget categories
-BUDGET_CATEGORIES = {
-    "Sales": [
-        ("REVENUE",       "Doanh thu bán hàng",        5_000_000_000,  50_000_000_000),
-        ("COGS",          "Giá vốn hàng bán",          3_000_000_000,  30_000_000_000),
-        ("GROSS_PROFIT",  "Lợi nhuận gộp",             1_500_000_000,  20_000_000_000),
-        ("TRADE_SPEND",   "Chi phí thương mại",          200_000_000,   2_000_000_000),
-    ],
-    "Marketing": [
-        ("ATL_SPEND",     "Chi phí quảng cáo ATL",      500_000_000,   5_000_000_000),
-        ("BTL_SPEND",     "Chi phí BTL / activation",   100_000_000,   1_000_000_000),
-        ("DIGITAL_SPEND", "Chi phí digital",             50_000_000,     500_000_000),
-    ],
-    "Production": [
-        ("RAW_MATERIAL",  "Chi phí nguyên vật liệu",   2_000_000_000,  20_000_000_000),
-        ("LABOR",         "Chi phí nhân công SX",        500_000_000,   5_000_000_000),
-        ("OVERHEAD",      "Chi phí sản xuất chung",      200_000_000,   2_000_000_000),
-        ("MAINTENANCE",   "Chi phí bảo trì thiết bị",   100_000_000,   1_000_000_000),
-    ],
-    "Admin": [
-        ("SALARY",        "Chi phí lương nhân viên",    200_000_000,   2_000_000_000),
-        ("OFFICE",        "Chi phí văn phòng",           20_000_000,     200_000_000),
-        ("TRAVEL",        "Chi phí công tác",            10_000_000,     100_000_000),
-    ],
-    "Finance": [
-        ("INTEREST",      "Chi phí lãi vay",             50_000_000,     500_000_000),
-        ("FOREX_RISK",    "Dự phòng rủi ro tỷ giá",     30_000_000,     300_000_000),
-    ],
-    "IT": [
-        ("SAAS",          "Chi phí phần mềm SaaS",       50_000_000,     300_000_000),
-        ("INFRA",         "Chi phí hạ tầng IT",          30_000_000,     200_000_000),
-    ],
-    "R&D": [
-        ("RD_COST",       "Chi phí nghiên cứu phát triển", 100_000_000, 1_000_000_000),
-    ],
-    "Supply Chain": [
-        ("LOGISTICS",     "Chi phí vận tải",            200_000_000,   2_000_000_000),
-        ("WAREHOUSE",     "Chi phí kho bãi",            100_000_000,   1_000_000_000),
-    ],
-    "Quality": [
-        ("QA_COST",       "Chi phí kiểm soát chất lượng", 50_000_000,   500_000_000),
-    ],
-}
-
-# Track "last sheet state" để chỉ push khi có thay đổi
-_last_hash: dict[str, str] = {}
-
+_last_hash = ""
 
 # ─────────────────────────────────────────────────────────
-# BUDGET DATA GENERATOR
+# GOOGLE SHEETS API
 # ─────────────────────────────────────────────────────────
-def generate_budget_for_month(year: int, month: int) -> list[dict]:
-    """Tạo kế hoạch ngân sách đầy đủ cho một tháng."""
-    budget_records = []
-    budget_date = date(year, month, 1)
+def fetch_budget_from_gsheets() -> list[dict]:
+    if not GOOGLE_SHEET_ID:
+        logger.error("❌ GOOGLE_SHEET_ID is empty! Please configure it in .env")
+        return []
 
-    for cc in COST_CENTERS:
-        division = cc["division"]
-        categories = BUDGET_CATEGORIES.get(division, [])
+    if not os.path.exists(CREDENTIALS_FILE):
+        logger.error(f"❌ Cannot find {CREDENTIALS_FILE}. Cannot authenticate with Google Sheets.")
+        return []
 
-        for cat_code, cat_name, min_amt, max_amt in categories:
-            # Kế hoạch ban đầu (plan)
-            planned = round(random.uniform(min_amt, max_amt), -6)
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+    client = gspread.authorize(creds)
 
-            # Forecast (có thể khác plan do điều chỉnh)
-            variance_pct = random.uniform(-0.15, 0.20)   # ±15–20%
-            forecast = round(planned * (1 + variance_pct), -6)
-
-            # Actual YTD (chỉ có data cho các tháng đã qua)
-            today = date.today()
-            if budget_date < today.replace(day=1):
-                actual_variance = random.uniform(-0.10, 0.12)
-                actual = round(planned * (1 + actual_variance), -6)
+    try:
+        sheet = client.open_by_key(GOOGLE_SHEET_ID).worksheet("Budget_Plan_2026")
+        records = sheet.get_all_records()
+        
+        parsed_records = []
+        for r in records:
+            # Bỏ qua các dòng trống
+            if not str(r.get("Budget_ID", "")).strip():
+                continue
+                
+            budget_id = str(r.get("Budget_ID", "")).strip()
+            fiscal_year = int(r.get("Fiscal_Year", datetime.today().year))
+            month = int(r.get("Month", datetime.today().month))
+            cost_center = str(r.get("Cost_Center", "")).strip()
+            department = str(r.get("Department", "")).strip()
+            account_code = str(r.get("Account_Code", "")).strip()
+            account_name = str(r.get("Account_Name", "")).strip()
+            product_group = str(r.get("Product_Group", "")).strip()
+            
+            # Clean budget amount (in case of commas or dots)
+            budget_amount_raw = r.get("Budget_Amount", 0)
+            if isinstance(budget_amount_raw, str):
+                budget_amount_raw = budget_amount_raw.replace('.', '').replace(',', '')
+                try:
+                    budget_amount = float(budget_amount_raw)
+                except ValueError:
+                    budget_amount = 0.0
             else:
-                actual = None  # chưa có actual cho tháng tương lai
+                budget_amount = float(budget_amount_raw)
+                
+            currency = str(r.get("Currency", "VND")).strip()
+            approved_by = str(r.get("Approved_By", "")).strip()
+            status = str(r.get("Status", "")).strip()
+            updated_date = str(r.get("Updated_Date", "")).strip()
 
             record = {
-                # Dimensions
-                "budget_year":    year,
-                "budget_month":   month,
-                "budget_date":    budget_date.isoformat(),
-                "cost_center":    cc["code"],
-                "cost_center_name": cc["name"],
-                "division":       division,
-                "category_code":  cat_code,
-                "category_name":  cat_name,
-                "currency":       "VND",
-
-                # Amounts
-                "planned_amount": planned,
-                "forecast_amount": forecast,
-                "actual_amount":  actual,
-                "variance_plan_forecast": round(forecast - planned, -3) if forecast else None,
-                "variance_pct":   round(variance_pct * 100, 2),
+                "budget_id": budget_id,
+                "fiscal_year": fiscal_year,
+                "month": month,
+                "cost_center": cost_center,
+                "department": department,
+                "account_code": account_code,
+                "account_name": account_name,
+                "product_group": product_group,
+                "budget_amount": budget_amount,
+                "currency": currency,
+                "approved_by": approved_by,
+                "status": status,
+                "updated_date": updated_date,
 
                 # Metadata
-                "version":        1,
-                "approved_by":    random.choice(["CFO", "Head of Finance", "Budget Committee"]),
-                "last_updated_by": random.choice([
-                    "nguyen.thi.a", "tran.van.b", "le.thi.c", "pham.van.d"
-                ]),
-                "sheet_name":     f"Budget_{year}_M{month:02d}",
-                "source":         "GOOGLE_SHEETS_MOCK",
-                "_ingested_at":   datetime.now().isoformat(),
-                "_topic":         KAFKA_TOPIC,
+                "version": 1,
+                "sheet_id": GOOGLE_SHEET_ID,
+                "source": "GOOGLE_SHEETS_REAL_API",
+                "_ingested_at": datetime.now().isoformat(),
+                "_topic": KAFKA_TOPIC,
             }
-            budget_records.append(record)
-
-    return budget_records
-
-
-def simulate_sheet_update(records: list[dict]) -> list[dict]:
-    """Giả lập user chỉnh 1-3 dòng trong sheet → tạo phiên bản mới."""
-    updated = []
-    n_updates = random.randint(1, 3)
-    indices = random.sample(range(len(records)), min(n_updates, len(records)))
-
-    for i, rec in enumerate(records):
-        if i in indices:
-            rec = dict(rec)  # copy
-            # Điều chỉnh forecast ±5%
-            old_forecast = rec["forecast_amount"]
-            delta = random.uniform(-0.05, 0.05)
-            rec["forecast_amount"] = round(old_forecast * (1 + delta), -6)
-            rec["variance_plan_forecast"] = round(rec["forecast_amount"] - rec["planned_amount"], -3)
-            rec["version"] = rec.get("version", 1) + 1
-            rec["last_updated_by"] = random.choice([
-                "nguyen.thi.a", "tran.van.b", "le.thi.c", "pham.van.d"
-            ])
-            rec["_ingested_at"] = datetime.now().isoformat()
-            updated.append(rec)
-
-    return updated
-
+            parsed_records.append(record)
+        return parsed_records
+    except Exception as e:
+        logger.error(f"Error reading Google Sheets API: {e}")
+        return []
 
 def compute_hash(records: list[dict]) -> str:
-    """Hash nội dung sheet để detect thay đổi."""
+    """Hash nội dung data để detect thay đổi."""
     content = json.dumps(
-        [(r["cost_center"], r["category_code"], r["forecast_amount"]) for r in records],
+        [(r["budget_id"], r["budget_amount"], r["status"]) for r in records],
         sort_keys=True
     )
     return hashlib.md5(content.encode()).hexdigest()
-
 
 # ─────────────────────────────────────────────────────────
 # KAFKA PUBLISH
 # ─────────────────────────────────────────────────────────
 def publish_records(records: list[dict], producer) -> int:
-    """Đẩy từng record vào Kafka topic."""
     count = 0
     for rec in records:
-        key = f"{rec['budget_year']}-{rec['budget_month']:02d}_{rec['cost_center']}_{rec['category_code']}".encode()
+        key = rec['budget_id'].encode()
         producer.send(
             KAFKA_TOPIC,
             key=key,
             value=json.dumps(rec, ensure_ascii=False, default=str).encode("utf-8")
         )
         count += 1
-
     producer.flush()
     return count
-
 
 # ─────────────────────────────────────────────────────────
 # MAIN LOGIC
 # ─────────────────────────────────────────────────────────
-def run_once(backfill: bool = False):
-    """Một lần poll: sinh/cập nhật budget và push Kafka nếu có thay đổi."""
-    today = date.today()
+def run_once():
+    global _last_hash
+    logger.info("Fetching data from Google Sheets API...")
+    records = fetch_budget_from_gsheets()
+    
+    if not records:
+        logger.info("No records fetched.")
+        return 0
 
-    # Tháng cần publish
-    if backfill:
-        months = [(today.year, m) for m in range(1, 13)]  # cả năm 2026
-    else:
-        # Current month + next 3 months (planning horizon)
-        months = []
-        for offset in range(0, 4):
-            d = today + relativedelta(months=offset)
-            months.append((d.year, d.month))
+    new_hash = compute_hash(records)
+    
+    if new_hash == _last_hash:
+        logger.info(f"Google Sheet data no changes (hash matched) — skipped.")
+        return 0
 
+    _last_hash = new_hash
+    
     producer = None
     if KAFKA_AVAILABLE:
         try:
@@ -268,75 +186,36 @@ def run_once(backfill: bool = False):
                 })
 
             producer = KafkaProducer(**kafka_config)
-            logger.info(f"Connected to Kafka: {KAFKA_BOOTSTRAP}")
         except Exception as e:
             logger.error(f"Kafka connection failed: {e}")
-            logger.info("Printing to console only")
 
     total_pushed = 0
-    for year, month in months:
-        sheet_key = f"{year}-{month:02d}"
-        records = generate_budget_for_month(year, month)
-
-        # Giả lập: sau lần đầu, chỉ update 1-3 dòng (người dùng chỉnh)
-        if sheet_key in _last_hash:
-            records_to_push = simulate_sheet_update(records)
-            change_type = "UPDATE"
-        else:
-            records_to_push = records
-            change_type = "FULL_SYNC"
-
-        new_hash = compute_hash(records)
-
-        # Chỉ push nếu có thay đổi (hash khác)
-        if new_hash == _last_hash.get(sheet_key):
-            logger.info(f"  {sheet_key}: No changes — skip")
-            continue
-
-        _last_hash[sheet_key] = new_hash
-
-        if producer:
-            pushed = publish_records(records_to_push, producer)
-            total_pushed += pushed
-            logger.info(
-                f"  {sheet_key} [{change_type}]: pushed {pushed} records "
-                f"({len(COST_CENTERS)} cost centers × categories)"
-            )
-        else:
-            logger.info(f"  {sheet_key} [{change_type}]: {len(records_to_push)} records (no Kafka)")
-            for r in records_to_push[:2]:
-                logger.info(f"    Sample: {r['cost_center']} / {r['category_code']} = {r['planned_amount']:,.0f} VND")
-            total_pushed += len(records_to_push)
-
     if producer:
+        total_pushed = publish_records(records, producer)
         producer.close()
+        logger.info(f"✅ Pushed {total_pushed} records to Kafka topic {KAFKA_TOPIC}")
+    else:
+        logger.info(f"Found {len(records)} records (no Kafka)")
+        for r in records[:2]:
+            logger.info(f"  Sample: {r['budget_id']} = {r['budget_amount']:,.0f} {r['currency']}")
+        total_pushed = len(records)
 
-    logger.info(f"Budget poll complete. Total pushed: {total_pushed}")
     return total_pushed
 
-
 def run_loop(interval: int = POLL_INTERVAL):
-    """Loop mỗi 5 phút như Google Sheets webhook."""
-    logger.info(f"Budget Plan Producer starting (poll every {interval}s / {interval//60} min)")
+    logger.info(f"Budget Plan Producer starting (poll every {interval}s)")
     while True:
-        logger.info("Polling Google Sheets (mock)...")
         run_once()
-        logger.info(f"Next poll in {interval}s")
         time.sleep(interval)
 
-
-# ─────────────────────────────────────────────────────────
-# CLI
-# ─────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="VinaMilk Budget Plan Producer")
-    parser.add_argument("--loop",     action="store_true", help="Loop moi 5 phut (Loop every 5 minutes)")
-    parser.add_argument("--backfill", action="store_true", help="Sinh du 12 thang nam 2026 (Backfill 12 months)")
-    parser.add_argument("--interval", type=int, default=POLL_INTERVAL,
-                        help=f"Poll interval (seconds, default: {POLL_INTERVAL})")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--loop", action="store_true")
+    # Add backfill arg to match docker-compose
+    parser.add_argument("--backfill", action="store_true")
     args = parser.parse_args()
 
     if args.loop:
-        run_loop(interval=args.interval)
+        run_loop()
     else:
-        run_once(backfill=args.backfill)
+        run_once()

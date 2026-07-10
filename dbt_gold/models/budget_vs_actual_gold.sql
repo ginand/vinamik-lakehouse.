@@ -13,63 +13,47 @@
 
 WITH budget AS (
     SELECT
-        JSON_EXTRACT_STRING(raw_payload, '$.cost_center')         AS cost_center,
-        JSON_EXTRACT_STRING(raw_payload, '$.gl_account')          AS gl_account,
-        CAST(JSON_EXTRACT(raw_payload, '$.fiscal_year')   AS INT) AS fiscal_year,
-        CAST(JSON_EXTRACT(raw_payload, '$.fiscal_period') AS INT) AS fiscal_period,
-        CAST(JSON_EXTRACT(raw_payload, '$.budgeted_amount_vnd') AS DOUBLE) AS budgeted_amount_vnd
+        fiscal_period AS budget_month,
+        cost_center,
+        SUM(budgeted_amount_vnd) AS budget_amount
     FROM {{ silver_source('budget_plan_silver') }}
-    WHERE _is_deleted = FALSE
-      AND JSON_EXTRACT_STRING(raw_payload, '$.cost_center') IS NOT NULL
-),
-
-budget_agg AS (
-    SELECT
-        cost_center, gl_account, fiscal_year, fiscal_period,
-        ROUND(SUM(budgeted_amount_vnd), 0) AS budgeted_amount_vnd
-    FROM budget
-    GROUP BY cost_center, gl_account, fiscal_year, fiscal_period
+    WHERE cost_center IS NOT NULL
+    GROUP BY 
+        fiscal_period,
+        cost_center
 ),
 
 actual AS (
     SELECT
+        txn.fiscal_period AS actual_month,
         gl.cost_center,
-        gl.account_id                          AS gl_account,
-        txn.fiscal_year,
-        txn.fiscal_period,
-        ROUND(SUM(gl.amount_vnd), 0)           AS actual_amount_vnd
+        SUM(coalesce(gl.amount_vnd, gl.amount)) AS actual_amount
     FROM {{ silver_source('general_ledger_silver') }} gl
     LEFT JOIN {{ silver_source('transactions_silver') }} txn
            ON gl.txn_id = txn.txn_id
     WHERE gl._is_deleted = FALSE
       AND gl.dq_is_clean = TRUE
-      AND gl.debit_credit = 'D'
-      AND REGEXP_MATCHES(gl.account_id, '^[67]')
+      AND gl.debit_credit = 'D' -- Chi phí thường ghi nợ
+      AND gl.account_id LIKE '6%' -- Các tài khoản chi phí
+      AND gl.cost_center IS NOT NULL
       AND txn.status = 'POSTED'
-    GROUP BY gl.cost_center, gl.account_id, txn.fiscal_year, txn.fiscal_period
+    GROUP BY 
+        txn.fiscal_period,
+        gl.cost_center
 )
 
 SELECT
-    COALESCE(b.cost_center, a.cost_center)         AS cost_center,
-    COALESCE(b.gl_account,  a.gl_account)          AS gl_account,
-    COALESCE(b.fiscal_year, a.fiscal_year)         AS fiscal_year,
-    COALESCE(b.fiscal_period, a.fiscal_period)     AS fiscal_period,
-    COALESCE(b.budgeted_amount_vnd, 0)             AS budgeted_amount_vnd,
-    COALESCE(a.actual_amount_vnd, 0)               AS actual_amount_vnd,
-    COALESCE(a.actual_amount_vnd, 0) - COALESCE(b.budgeted_amount_vnd, 0) AS variance_vnd,
+    COALESCE(b.budget_month, a.actual_month) AS Month,
+    COALESCE(b.cost_center, a.cost_center) AS Cost_Center,
+    COALESCE(b.budget_amount, 0) AS Budget,
+    COALESCE(a.actual_amount, 0) AS Actual,
+    COALESCE(a.actual_amount, 0) - COALESCE(b.budget_amount, 0) AS Variance,
     CASE
-        WHEN COALESCE(b.budgeted_amount_vnd, 0) = 0 THEN NULL
-        ELSE ROUND(COALESCE(a.actual_amount_vnd, 0) / b.budgeted_amount_vnd * 100, 2)
-    END                                            AS achievement_pct,
-    CASE
-        WHEN COALESCE(a.actual_amount_vnd, 0) > COALESCE(b.budgeted_amount_vnd, 0) * 1.1 THEN 'OVER_BUDGET'
-        WHEN COALESCE(a.actual_amount_vnd, 0) < COALESCE(b.budgeted_amount_vnd, 0) * 0.9 THEN 'UNDER_BUDGET'
-        ELSE 'ON_TRACK'
-    END                                            AS status_flag,
-    NOW()                                          AS _gold_computed_at
-FROM budget_agg b
+        WHEN COALESCE(b.budget_amount, 0) = 0 THEN NULL
+        ELSE ROUND((COALESCE(a.actual_amount, 0) / b.budget_amount) * 100, 2)
+    END AS Completion,
+    NOW() AS _gold_computed_at
+FROM budget b
 FULL OUTER JOIN actual a
-    ON b.cost_center  = a.cost_center
-   AND b.gl_account   = a.gl_account
-   AND b.fiscal_year  = a.fiscal_year
-   AND b.fiscal_period = a.fiscal_period
+    ON b.budget_month = a.actual_month
+   AND b.cost_center = a.cost_center

@@ -17,7 +17,7 @@ ENV POSTGRES_HOST=postgres
 ENV POSTGRES_PORT=5432
 ENV POSTGRES_DB=vinamik_erp
 ENV POSTGRES_USER=postgres
-ENV POSTGRES_PASS=vinamik@2024
+ENV POSTGRES_PASS=1
 ENV LOG_LEVEL=INFO
 
 # Default: continuous mode at normal speed

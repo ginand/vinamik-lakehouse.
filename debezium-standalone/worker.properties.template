@@ -1,0 +1,23 @@
+bootstrap.servers=__EH_NAMESPACE__.servicebus.windows.net:9093
+
+# Security settings for Event Hubs
+security.protocol=SASL_SSL
+sasl.mechanism=PLAIN
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="$ConnectionString" password="__EH_CONN_STR__";
+
+# Producer Security for Event Hubs
+producer.security.protocol=SASL_SSL
+producer.sasl.mechanism=PLAIN
+producer.sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="$ConnectionString" password="__EH_CONN_STR__";
+
+# Converters
+key.converter=org.apache.kafka.connect.json.JsonConverter
+value.converter=org.apache.kafka.connect.json.JsonConverter
+key.converter.schemas.enable=false
+value.converter.schemas.enable=false
+
+# Standalone specific settings
+offset.storage.file.filename=/debezium/data/offsets.dat
+offset.flush.interval.ms=10000
+
+plugin.path=/kafka/connect

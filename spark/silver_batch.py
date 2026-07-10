@@ -42,6 +42,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger("vinamik.silver_batch")
+logging.getLogger("py4j").setLevel(logging.WARNING)
 
 # ─────────────────────────────────────────────────────────
 # ENV CONFIG
@@ -81,8 +82,8 @@ def create_spark() -> SparkSession:
     spark = (
         SparkSession.builder
         .appName("VinaMilk-Silver-Batch")
-        .config("spark.driver.memory", "1g")
-        .config("spark.executor.memory", "1g")
+        .config("spark.driver.memory", "2g")
+        .config("spark.executor.memory", "2g")
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .config("spark.sql.shuffle.partitions", "4") # FIX OOM: Default is 200, which uses too much memory for local micro-batches
@@ -240,6 +241,24 @@ FX_PAYLOAD_SCHEMA = StructType([
     StructField("source",            StringType()),
     StructField("fiscal_year",       IntegerType()),
     StructField("fiscal_period",     IntegerType()),
+])
+
+BUDGET_PAYLOAD_SCHEMA = StructType([
+    StructField("budget_id", StringType()),
+    StructField("fiscal_year", IntegerType()),
+    StructField("month", IntegerType()),
+    StructField("cost_center", StringType()),
+    StructField("department", StringType()),
+    StructField("account_code", StringType()),
+    StructField("account_name", StringType()),
+    StructField("product_group", StringType()),
+    StructField("budget_amount", DoubleType()),
+    StructField("currency", StringType()),
+    StructField("approved_by", StringType()),
+    StructField("status", StringType()),
+    StructField("updated_date", StringType()),
+    StructField("version", IntegerType()),
+    StructField("source", StringType())
 ])
 
 # ─────────────────────────────────────────────────────────
@@ -471,6 +490,29 @@ def transform_fx_rates(df: DataFrame) -> DataFrame:
         .filter(col("currency").isNotNull() & col("rate_vnd").isNotNull())
     )
 
+def transform_budget_plan(df: DataFrame) -> DataFrame:
+    return (
+        df.withColumn("_bp", from_json(col("raw_payload"), BUDGET_PAYLOAD_SCHEMA))
+        .filter(col("_bp").isNotNull())
+        .select(
+            col("_bp.budget_id").alias("budget_id"),
+            col("_bp.fiscal_year").alias("fiscal_year"),
+            col("_bp.month").alias("month"),
+            col("_bp.cost_center").alias("cost_center"),
+            col("_bp.department").alias("department"),
+            col("_bp.account_code").alias("account_code"),
+            col("_bp.account_name").alias("account_name"),
+            col("_bp.product_group").alias("product_group"),
+            col("_bp.budget_amount").alias("budget_amount"),
+            col("_bp.currency").alias("currency"),
+            col("_bp.approved_by").alias("approved_by"),
+            col("_bp.status").alias("status"),
+            col("_bp.updated_date").alias("updated_date"),
+            lit(False).alias("_is_deleted"),
+            current_timestamp().alias("_silver_loaded_at")
+        )
+    )
+
 
 # ─────────────────────────────────────────────────────────
 # DATA QUALITY — Quarantine Logic
@@ -575,6 +617,7 @@ def merge_into_silver(
     new_df: DataFrame,
     silver_table_path: str,
     pk_col: str,
+    partition_col: str = None
 ):
     """
     MERGE new_df into Silver Delta table at silver_table_path.
@@ -602,12 +645,10 @@ def merge_into_silver(
         if any(hint in err_msg for hint in _TABLE_NOT_FOUND_HINTS):
             # Bảng chưa tồn tại → tạo mới
             logger.info(f"    ℹ️  Silver table chưa có → tạo mới: {silver_table_path}")
-            (
-                new_df.write
-                .format("delta")
-                .mode("overwrite")
-                .save(silver_table_path)
-            )
+            writer = new_df.write.format("delta").mode("overwrite")
+            if partition_col:
+                writer = writer.partitionBy(partition_col)
+            writer.save(silver_table_path)
         else:
             # Lỗi thực sự (schema mismatch, ADLS auth, v.v.) → re-raise
             raise
@@ -666,6 +707,13 @@ PIPELINE = [
         "pk":        "currency",
         "partition": None,
     },
+    {
+        "bronze":    "budget_plan_bronze",
+        "silver":    "budget_plan_silver",
+        "transform": transform_budget_plan,
+        "pk":        "budget_id",
+        "partition": "month",
+    }
 ]
 
 
@@ -749,7 +797,7 @@ def run_silver_batch(spark: SparkSession):
                     # Merge: clean records + deleted records (soft-delete)
                     merge_df = clean_df.unionByName(deleted_df, allowMissingColumns=True) \
                         if del_count > 0 else clean_df
-                    merge_into_silver(spark, merge_df, silver_path, cfg["pk"])
+                    merge_into_silver(spark, merge_df, silver_path, cfg["pk"], cfg.get("partition"))
                     logger.info(
                         f"    ✅ [Batch {batch_id}] {in_count} bronze → "
                         f"{out_count} silver | {q_count} quarantined | {del_count} deleted"
@@ -764,6 +812,8 @@ def run_silver_batch(spark: SparkSession):
 
             query = (
                 spark.readStream.format("delta")
+                .option("maxFilesPerTrigger", 100000) # Ép gộp nhiều file nhỏ vào 1 batch
+                .option("maxBytesPerTrigger", "500m") # Xử lý tối đa 500MB/batch
                 .load(bronze_path)
                 .writeStream
                 .foreachBatch(process_micro_batch)
@@ -779,8 +829,7 @@ def run_silver_batch(spark: SparkSession):
             return False, cfg['silver']
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    
-    with ThreadPoolExecutor(max_workers=7) as executor:
+    with ThreadPoolExecutor(max_workers=2) as executor:
         futures = []
         for cfg in PIPELINE:
             futures.append(executor.submit(process_cfg, cfg))

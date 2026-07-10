@@ -36,12 +36,12 @@ SELECT
     ar.invoice_month,
     COUNT(ar.ar_id)                                   AS num_invoices,
     ROUND(SUM(ar.outstanding_vnd), 0)                 AS total_outstanding_vnd,
-    ROUND(SUM(ar.amount_vnd), 0)                      AS total_invoiced_vnd,
+    ROUND(SUM(coalesce(ar.amount_vnd, ar.amount)), 0)                      AS total_invoiced_vnd,
     ROUND(SUM(ar.paid_amount), 0)                     AS total_paid_vnd,
     ROUND(AVG(ar.overdue_days), 1)                    AS avg_overdue_days,
     ROUND(MAX(ar.overdue_days), 0)                    AS max_overdue_days,
     ROUND(MAX(c.credit_limit), 0)                     AS credit_limit,
-    ROUND(SUM(ar.paid_amount) / NULLIF(SUM(ar.amount_vnd), 0) * 100, 2) AS collection_rate_pct,
+    ROUND(SUM(ar.paid_amount) / NULLIF(SUM(coalesce(ar.amount_vnd, ar.amount)), 0) * 100, 2) AS collection_rate_pct,
     NOW()                                             AS _gold_computed_at
 FROM ar
 LEFT JOIN customers c ON ar.customer_id = c.customer_id

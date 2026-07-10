@@ -4,14 +4,20 @@ vinamik-gold:
       type: duckdb
       path: ":memory:"
       extensions:
+        - httpfs
         - delta
         - azure
       settings:
         # Giới hạn RAM cho DuckDB để tránh gây treo máy (OOM trên WSL)
         memory_limit: "1GB"
-        # ─── Azure Auth via Account Key (chạy Docker local, không có Managed Identity) ─
-        # Connection string được đọc từ biến môi trường (truyền qua Airflow DAG)
-        # Không hardcode credentials trong file config — tránh lộ khi commit Git
-        azure_storage_connection_string: "{{ env_var('AZURE_STORAGE_CONNECTION_STRING') }}"
+        # Bắt buộc chỉ định file CA Cert trên Linux để DuckDB/Azure không bị lỗi SSL
+        ca_cert_file: "/etc/ssl/certs/ca-certificates.crt"
+      setup:
+        - "SET CA_CERT_FILE='/etc/ssl/certs/ca-certificates.crt';"
+        # ─── Azure Auth via Secrets Manager (DuckDB >= 1.0) ─────────
+      secrets:
+        - type: azure
+          provider: config
+          connection_string: "{{ env_var('AZURE_STORAGE_CONNECTION_STRING') | replace('https', 'http') }}"
   target: dev
 

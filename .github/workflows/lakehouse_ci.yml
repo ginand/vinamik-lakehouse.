@@ -74,29 +74,26 @@ jobs:
           dbt parse --profiles-dir .
 
   deploy_production:
-    name: Deploy to Production
+    name: Deploy to Docker Server
     runs-on: ubuntu-latest
     needs: [unit_tests, dbt_tests]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
-      - uses: actions/checkout@v3
-
-      - name: Deploy Airflow DAGs to Azure Blob
-        env:
-          AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
-          AZURE_STORAGE_KEY:     ${{ secrets.AZURE_STORAGE_KEY }}
-        run: |
-          # Create container if it doesn't exist
-          az storage container create \
-            --name airflow-dags \
-            --account-name $AZURE_STORAGE_ACCOUNT \
-            --account-key $AZURE_STORAGE_KEY \
-            --output none || true
-
-          # Upload all DAGs
-          az storage blob upload-batch \
-            --account-name $AZURE_STORAGE_ACCOUNT \
-            --account-key  $AZURE_STORAGE_KEY \
-            --destination  airflow-dags \
-            --source       dags/
+      - name: SSH and Update Docker
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          script: |
+            cd /path/to/vinamik-lakehouse
+            git pull origin main
+            
+            # Restart cụm Airflow/Spark nếu có thay đổi cấu hình hoặc dockerfile
+            # docker-compose up -d --build
+            
+            # Lưu ý: Vì DAGs, thư mục spark và dbt_gold đã được mount qua volumes
+            # Việc git pull sẽ tự động cập nhật code bên trong container.
+            echo "Deploy thành công! Code mới đã được đồng bộ vào server."
 

@@ -31,12 +31,12 @@ SELECT
     txn.fiscal_year,
     txn.fiscal_period,
     txn.posting_month,
-    ROUND(SUM(CASE WHEN gl.debit_credit = 'D' THEN gl.amount_vnd ELSE 0 END), 0) AS total_debit_vnd,
-    ROUND(SUM(CASE WHEN gl.debit_credit = 'C' THEN gl.amount_vnd ELSE 0 END), 0) AS total_credit_vnd,
+    ROUND(SUM(CASE WHEN gl.debit_credit = 'D' THEN coalesce(gl.amount_vnd, gl.amount) ELSE 0 END), 0) AS total_debit_vnd,
+    ROUND(SUM(CASE WHEN gl.debit_credit = 'C' THEN coalesce(gl.amount_vnd, gl.amount) ELSE 0 END), 0) AS total_credit_vnd,
     COUNT(gl.gl_id)                                                                AS num_line_items,
     ROUND(
-        SUM(CASE WHEN gl.debit_credit = 'D' THEN gl.amount_vnd ELSE 0 END) -
-        SUM(CASE WHEN gl.debit_credit = 'C' THEN gl.amount_vnd ELSE 0 END),
+        SUM(CASE WHEN gl.debit_credit = 'D' THEN coalesce(gl.amount_vnd, gl.amount) ELSE 0 END) -
+        SUM(CASE WHEN gl.debit_credit = 'C' THEN coalesce(gl.amount_vnd, gl.amount) ELSE 0 END),
         0
     )                                                                              AS net_balance_vnd,
     NOW()                                                                          AS _gold_computed_at

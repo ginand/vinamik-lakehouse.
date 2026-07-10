@@ -48,6 +48,8 @@ SPARK_SUBMIT = (
 DBT_RUN = (
     "export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt && "
     "export SSL_CERT_DIR=/etc/ssl/certs && "
+    "export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt && "
+    "export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt && "
     "/home/airflow/.local/bin/dbt run"
     " --project-dir /opt/dbt_gold"
     " --profiles-dir /opt/dbt_gold"
@@ -111,7 +113,29 @@ with DAG(
         """,
     )
 
-    # ── Task 3: Gold dbt run (dbt-duckdb) ───────────────
+    # ── Task 3: Great Expectations Validation (PySpark) ──
+    gx_validation = BashOperator(
+        task_id="gx_validation",
+        bash_command=SPARK_SUBMIT.format(script="gx_health_check.py"),
+        env={
+            **os.environ,
+            "AZURE_STORAGE_ACCOUNT_NAME": azure_acc_name,
+            "AZURE_STORAGE_ACCOUNT_KEY":  azure_acc_key,
+        },
+        doc_md="""
+        ### Great Expectations (GX)
+        Chạy script gx_health_check.py để kiểm định dữ liệu Silver 
+        và tự động sinh ra các file HTML (Data Docs) báo cáo chất lượng dữ liệu.
+        """,
+    )
+
+    azure_conn_str = (
+        "DefaultEndpointsProtocol=http;"
+        f"AccountName={azure_acc_name};"
+        f"AccountKey={azure_acc_key};"
+        "EndpointSuffix=core.windows.net"
+    )
+
     gold_dbt = BashOperator(
         task_id="gold_dbt_run",
         bash_command=DBT_RUN,
@@ -119,19 +143,16 @@ with DAG(
             **os.environ,
             "AZURE_STORAGE_ACCOUNT_NAME": azure_acc_name,
             "AZURE_STORAGE_ACCOUNT_KEY":  azure_acc_key,
-            "AZURE_STORAGE_CONNECTION_STRING": (
-                "DefaultEndpointsProtocol=https;"
-                f"AccountName={azure_acc_name};"
-                f"AccountKey={azure_acc_key};"
-                "EndpointSuffix=core.windows.net"
-            ),
-            "SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt",
+            "AZURE_STORAGE_CONNECTION_STRING": azure_conn_str,
+            "SSL_CERT_FILE":    "/etc/ssl/certs/ca-certificates.crt",
+            "SSL_CERT_DIR":     "/etc/ssl/certs",
+            "CURL_CA_BUNDLE":   "/etc/ssl/certs/ca-certificates.crt",
+            "REQUESTS_CA_BUNDLE": "/etc/ssl/certs/ca-certificates.crt",
         },
         doc_md="""
         ### Gold dbt run
         Chạy toàn bộ dbt models trong dbt_gold/ qua engine DuckDB (in-process).
-        DuckDB đọc Silver Delta trên ADLS Gen2, tính toán 7 bảng KPI Gold,
-        ghi lại kết quả xuống Gold container trên ADLS Gen2.
+        Đã sử dụng DefaultEndpointsProtocol=http để vượt qua lỗi SSL.
         Models:
           - revenue_by_product_gold
           - ar_aging_gold
@@ -146,5 +167,5 @@ with DAG(
     end = EmptyOperator(task_id="end")
 
     # ── Thứ tự phụ thuộc ────────────────────────────────
-    # start → silver_batch → dq_health_check → gold_dbt_run → end
-    start >> silver_batch >> dq_health_check >> gold_dbt >> end
+    # start → silver_batch → dq_health_check → gx_validation → gold_dbt_run → end
+    start >> silver_batch >> dq_health_check >> gx_validation >> gold_dbt >> end

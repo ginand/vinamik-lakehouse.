@@ -33,11 +33,11 @@ SELECT
     ap.invoice_month,
     COUNT(ap.ap_id)                                   AS num_invoices,
     ROUND(SUM(ap.outstanding_vnd), 0)                 AS total_outstanding_vnd,
-    ROUND(SUM(ap.amount_vnd), 0)                      AS total_invoiced_vnd,
+    ROUND(SUM(coalesce(ap.amount_vnd, ap.amount)), 0)                      AS total_invoiced_vnd,
     ROUND(SUM(ap.paid_amount), 0)                     AS total_paid_vnd,
     ROUND(AVG(ap.overdue_days), 1)                    AS avg_overdue_days,
     ROUND(MAX(ap.overdue_days), 0)                    AS max_overdue_days,
-    ROUND(SUM(ap.paid_amount) / NULLIF(SUM(ap.amount_vnd), 0) * 100, 2) AS payment_rate_pct,
+    ROUND(SUM(ap.paid_amount) / NULLIF(SUM(coalesce(ap.amount_vnd, ap.amount)), 0) * 100, 2) AS payment_rate_pct,
     NOW()                                             AS _gold_computed_at
 FROM ap
 LEFT JOIN vendors v ON ap.vendor_id = v.vendor_id

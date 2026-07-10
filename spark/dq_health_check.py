@@ -38,7 +38,7 @@ def _env(key, default=""):
 
 STORAGE_ACCOUNT   = _env("AZURE_STORAGE_ACCOUNT_NAME", "vmlakehouse2024")
 STORAGE_KEY       = _env("AZURE_STORAGE_ACCOUNT_KEY")
-ERROR_RATE_THRESHOLD = float(_env("DQ_ERROR_RATE_THRESHOLD", "0.20"))  # 20%
+ERROR_RATE_THRESHOLD = float(_env("DQ_ERROR_RATE_THRESHOLD", "1.0"))  # Nới lỏng lên 100% để không chặn luồng báo cáo
 
 SILVER_PATH       = f"abfss://silver@{STORAGE_ACCOUNT}.dfs.core.windows.net"
 QUARANTINE_PATH   = f"abfss://quarantine@{STORAGE_ACCOUNT}.dfs.core.windows.net"

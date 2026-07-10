@@ -40,3 +40,4 @@ Thumbs.db
 *.key
 *.pem
 connectors/*.json
+producers/*.json

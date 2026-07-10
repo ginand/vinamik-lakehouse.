@@ -18,7 +18,7 @@ WITH gl AS (
       AND dq_is_clean = TRUE
       AND account_id LIKE '511%'
       AND debit_credit = 'C'
-      AND amount_vnd > 0
+      AND coalesce(amount_vnd, amount) > 0
 ),
 
 txn AS (
@@ -34,7 +34,7 @@ joined AS (
         gl.gl_id,
         gl.txn_id,
         gl.account_id,
-        gl.amount_vnd,
+        coalesce(gl.amount_vnd, gl.amount) AS amount_vnd,
         gl.cost_center,
         SUBSTR(gl.account_id, 1, 4) AS product_line,
         txn.company_code,

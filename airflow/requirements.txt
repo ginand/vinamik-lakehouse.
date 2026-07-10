@@ -11,3 +11,4 @@ azure-storage-blob
 
 # Misc
 python-dotenv==1.0.1
+great_expectations>=0.18.0

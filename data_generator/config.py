@@ -12,7 +12,7 @@ DB_CONFIG = {
     "port":     int(os.getenv("POSTGRES_PORT", "5432")),
     "database": os.getenv("POSTGRES_DB",   "vinamik_erp"),
     "user":     os.getenv("POSTGRES_USER", "postgres"),
-    "password": os.getenv("POSTGRES_PASS", "vinamik@2024"),
+    "password": os.getenv("POSTGRES_PASS", "1"),
 }
 
 # ─────────────────────────────────────────────────────────

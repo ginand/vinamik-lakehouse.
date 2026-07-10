@@ -20,3 +20,7 @@ python-dateutil>=2.8.2
 
 # Environment variables
 python-dotenv>=1.0.0
+
+# Google Sheets API (budget_plan_producer)
+gspread>=5.12.0
+oauth2client>=4.1.3

@@ -24,7 +24,7 @@ on-run-start:
   - "SET CA_CERT_FILE='/etc/ssl/certs/ca-certificates.crt';"
   - "CREATE OR REPLACE SECRET vinamik_azure_secret (
         TYPE AZURE,
-        CONNECTION_STRING '{{ env_var(\"AZURE_STORAGE_CONNECTION_STRING\") }}'
+        CONNECTION_STRING '{{ env_var(\"AZURE_STORAGE_CONNECTION_STRING\") | replace(\"https\", \"http\") }}'
      );"
 
 models:
