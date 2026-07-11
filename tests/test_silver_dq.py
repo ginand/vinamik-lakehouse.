@@ -218,6 +218,38 @@ class TestTransactionDQRules:
         row = result.collect()[0]
         assert row["posting_month"] == "2024-10"
 
+    def test_null_company_code_flagged(self, spark):
+        """company_code NULL -> dq_null_company_code=True."""
+        df = make_bronze(spark, [_txn(company_code=None)])
+        result = sb.transform_transactions(df)
+        row = result.collect()[0]
+        assert row["dq_null_company_code"] is True
+        assert row["dq_is_clean"] is False
+
+    def test_null_txn_id_flagged(self, spark):
+        """txn_id NULL -> dq_null_txn_id=True."""
+        df = make_bronze(spark, [_txn(txn_id=None)])
+        result = sb.transform_transactions(df)
+        row = result.collect()[0]
+        assert row["dq_null_txn_id"] is True
+        assert row["dq_is_clean"] is False
+
+    def test_invalid_status_txn_flagged(self, spark):
+        """status invalid -> dq_invalid_status=True."""
+        df = make_bronze(spark, [_txn(status="INVALID")])
+        result = sb.transform_transactions(df)
+        row = result.collect()[0]
+        assert row["dq_invalid_status"] is True
+        assert row["dq_is_clean"] is False
+
+    def test_negative_amount_txn_flagged(self, spark):
+        """total_debit < 0 -> dq_negative_amount_txn=True."""
+        df = make_bronze(spark, [_txn(total_debit=-1000.0)])
+        result = sb.transform_transactions(df)
+        row = result.collect()[0]
+        assert row["dq_negative_amount_txn"] is True
+        assert row["dq_is_clean"] is False
+
 
 # ─────────────────────────────────────────────────────────
 # TEST CLASS 2 — DQ Rules cho Accounts Receivable (AR)

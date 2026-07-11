@@ -70,20 +70,6 @@ if __name__ == "__main__":
     )
     context = gx.get_context(project_config=project_config)
 
-    # Cấu hình Datasource cho Spark
-    datasource_config = {
-        "name": "spark_datasource",
-        "class_name": "Datasource",
-        "execution_engine": {"class_name": "SparkDFExecutionEngine"},
-        "data_connectors": {
-            "default_runtime_data_connector_name": {
-                "class_name": "RuntimeDataConnector",
-                "batch_identifiers": ["batch_id"],
-            }
-        },
-    }
-    context.add_datasource(**datasource_config)
-
     # 3. Đọc dữ liệu Silver
     logger.info("📖 Đọc dữ liệu transactions_silver từ ADLS...")
     try:
@@ -92,41 +78,34 @@ if __name__ == "__main__":
         logger.error(f"❌ Không thể đọc transactions_silver: {e}")
         sys.exit(0) # Bỏ qua nếu bảng chưa tồn tại
 
-    # 4. Định nghĩa Batch Request & Expectation Suite
-    batch_request = RuntimeBatchRequest(
-        datasource_name="spark_datasource",
-        data_connector_name="default_runtime_data_connector_name",
-        data_asset_name="transactions_silver",
-        runtime_parameters={"batch_data": df},
-        batch_identifiers={"batch_id": "current_batch"},
-    )
-
-    suite_name = "transactions_silver_suite"
-    context.add_expectation_suite(expectation_suite_name=suite_name)
-    validator = context.get_validator(batch_request=batch_request, expectation_suite_name=suite_name)
+    # Cấu hình Fluent Datasource cho Spark (Hỗ trợ Great Expectations 1.x)
+    logger.info("🔌 Khởi tạo Fluent Datasource cho Spark...")
+    datasource = context.data_sources.add_spark("spark_datasource")
+    data_asset = datasource.add_dataframe_asset(name="transactions_silver")
+    batch_definition = data_asset.add_batch_definition_whole_dataframe("my_batch")
 
     # 5. Các luật kiểm định chất lượng (Expectations)
     logger.info("⚖️ Áp dụng các luật kiểm định (Expectations)...")
-    validator.expect_column_values_to_not_be_null(column="txn_id")
-    validator.expect_column_values_to_not_be_null(column="company_code")
-    validator.expect_column_values_to_be_in_set(column="status", value_set=["POSTED", "DRAFT", "VOID"])
-    validator.expect_column_values_to_be_between(column="total_debit", min_value=0)
-    validator.expect_column_values_to_be_between(column="total_credit", min_value=0)
-    validator.save_expectation_suite(discard_failed_expectations=False)
+    import great_expectations.expectations as gxe
+    suite_name = "transactions_silver_suite"
+    suite = gx.ExpectationSuite(name=suite_name)
+    suite.add_expectation(gxe.ExpectColumnValuesToNotBeNull(column="txn_id"))
+    suite.add_expectation(gxe.ExpectColumnValuesToNotBeNull(column="company_code"))
+    suite.add_expectation(gxe.ExpectColumnValuesToBeInSet(column="status", value_set=["POSTED", "DRAFT", "VOID"]))
+    suite.add_expectation(gxe.ExpectColumnValuesToBeBetween(column="total_debit", min_value=0))
+    suite.add_expectation(gxe.ExpectColumnValuesToBeBetween(column="total_credit", min_value=0))
+    context.suites.add(suite)
 
-    # 6. Chạy Checkpoint
-    logger.info("🚀 Running Checkpoint...")
-    checkpoint_config = {
-        "name": "transactions_checkpoint",
-        "config_version": 1.0,
-        "class_name": "SimpleCheckpoint",
-        "run_name_template": "%Y%m%d-%H%M%S-validation",
-    }
-    context.add_checkpoint(**checkpoint_config)
-    results = context.run_checkpoint(
-        checkpoint_name="transactions_checkpoint",
-        validations=[{"batch_request": batch_request, "expectation_suite_name": suite_name}]
+    validation_def = gx.ValidationDefinition(
+        name="transactions_validation",
+        data=batch_definition,
+        suite=suite,
     )
+    context.validation_definitions.add(validation_def)
+
+    # 6. Chạy Validation
+    logger.info("🚀 Running Validation...")
+    results = validation_def.run(batch_parameters={"dataframe": df})
 
     # 7. Xuất Data Docs (HTML)
     logger.info("📑 Xây dựng Data Docs (HTML)...")
@@ -135,7 +114,7 @@ if __name__ == "__main__":
 
     spark.stop()
 
-    if not results["success"]:
+    if not results.success:
         logger.warning("⚠️ Có bản ghi không thỏa mãn luật kiểm định!")
         sys.exit(1)
     else:

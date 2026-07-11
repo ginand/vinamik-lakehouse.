@@ -352,8 +352,14 @@ def transform_transactions(df: DataFrame) -> DataFrame:
             (col("total_debit") == 0) & (col("total_credit") == 0))
         .withColumn("dq_wrong_currency",
             ~col("currency").isin("VND", "USD", "EUR", "JPY", "SGD"))
+        .withColumn("dq_null_company_code", col("company_code").isNull())
+        .withColumn("dq_null_txn_id", col("txn_id").isNull())
+        .withColumn("dq_invalid_status", ~col("status").isin("POSTED", "DRAFT", "VOID"))
+        .withColumn("dq_negative_amount_txn", (col("total_debit") < 0) | (col("total_credit") < 0))
         .withColumn("dq_is_clean",
-            ~col("dq_future_posting") & ~col("dq_amount_zero") & ~col("dq_wrong_currency"))
+            ~col("dq_future_posting") & ~col("dq_amount_zero") & ~col("dq_wrong_currency") &
+            ~col("dq_null_company_code") & ~col("dq_null_txn_id") &
+            ~col("dq_invalid_status") & ~col("dq_negative_amount_txn"))
         # Partition column
         .withColumn("posting_month", col("posting_date").cast(StringType()).substr(1, 7))
     )
@@ -526,6 +532,10 @@ DQ_FLAG_MAP = {
     "dq_future_posting":      ("FUTURE_POSTING_DATE",  "posting_date"),
     "dq_amount_zero":         ("AMOUNT_ZERO",          "total_debit/total_credit"),
     "dq_wrong_currency":      ("INVALID_CURRENCY",     "currency"),
+    "dq_null_company_code":   ("NULL_COMPANY_CODE",    "company_code"),
+    "dq_null_txn_id":         ("NULL_TXN_ID",          "txn_id"),
+    "dq_invalid_status":      ("INVALID_STATUS",       "status"),
+    "dq_negative_amount_txn": ("NEGATIVE_AMOUNT",      "total_debit/total_credit"),
     # General Ledger
     "dq_missing_cost_center": ("MISSING_COST_CENTER",  "cost_center"),
     "dq_negative_amount":     ("NEGATIVE_AMOUNT",      "amount"),
