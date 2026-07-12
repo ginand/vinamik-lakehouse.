@@ -42,7 +42,7 @@ joined AS (
         txn.fiscal_period,
         txn.posting_month
     FROM gl
-    LEFT JOIN txn ON gl.txn_id = txn.txn_id
+    INNER JOIN txn ON gl.txn_id = txn.txn_id
 )
 
 SELECT

@@ -19,5 +19,6 @@ vinamik-gold:
         - type: azure
           provider: config
           connection_string: "{{ env_var('AZURE_STORAGE_CONNECTION_STRING') | replace('https', 'http') }}"
+
   target: dev
 

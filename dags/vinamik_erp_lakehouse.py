@@ -50,7 +50,7 @@ DBT_RUN = (
     "export SSL_CERT_DIR=/etc/ssl/certs && "
     "export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt && "
     "export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt && "
-    "/home/airflow/.local/bin/dbt run"
+    "/home/airflow/.local/bin/dbt build"
     " --project-dir /opt/dbt_gold"
     " --profiles-dir /opt/dbt_gold"
     " --target dev"
@@ -164,8 +164,27 @@ with DAG(
         """,
     )
 
+    gold_dbt_test = EmptyOperator(
+        task_id="gold_dbt_test",
+        doc_md="""
+        ### Gold dbt test
+        Các bài test chất lượng dữ liệu (not_null, accepted_values) 
+        đã được tích hợp chạy chung với dbt build ở task gold_dbt_run để giữ 
+        kết nối in-memory DuckDB. Task này đóng vai trò placeholder.
+        """,
+    )
+
+    refresh_powerbi = EmptyOperator(
+        task_id="refresh_powerbi",
+        doc_md="""
+        ### Refresh Power BI
+        Gọi API để Refresh Dataset trên Power BI Service sau khi dbt chạy xong.
+        (Task mô phỏng bằng EmptyOperator do môi trường local)
+        """,
+    )
+
     end = EmptyOperator(task_id="end")
 
     # ── Thứ tự phụ thuộc ────────────────────────────────
-    # start → silver_batch → dq_health_check → gx_validation → gold_dbt_run → end
-    start >> silver_batch >> dq_health_check >> gx_validation >> gold_dbt >> end
+    # start → silver_batch → dq_health_check → gx_validation → gold_dbt_run → gold_dbt_test → refresh_powerbi → end
+    start >> silver_batch >> dq_health_check >> gx_validation >> gold_dbt >> gold_dbt_test >> refresh_powerbi >> end

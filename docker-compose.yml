@@ -238,6 +238,38 @@ services:
     command: airflow webserver
     restart: unless-stopped
 
+  # ─────────────────────────────────────────────────────────
+  # 15. GREAT EXPECTATIONS DATA DOCS — Web Server
+  # ─────────────────────────────────────────────────────────
+  gx-data-docs:
+    image: nginx:alpine
+    container_name: vinamik-gx-data-docs
+    ports:
+      - "8081:80"
+    volumes:
+      - ./dags/gx_data_docs:/usr/share/nginx/html:ro
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────────────────
+  # 16. DATA LAKEHOUSE EXPLORER — Streamlit Web UI
+  # ─────────────────────────────────────────────────────────
+  lakehouse-monitoring:
+    build:
+      context: ./web_ui
+      dockerfile: Dockerfile
+    container_name: vinamik-lakehouse-monitoring
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    volumes:
+      - ./web_ui:/app
+      - ./dbt_gold:/dbt_gold:ro
+    networks:
+      - default
+    restart: unless-stopped
+
+
 # ─────────────────────────────────────────────────────────
 # VOLUMES — Persistent data storage
 # ─────────────────────────────────────────────────────────

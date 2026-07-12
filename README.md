@@ -41,8 +41,9 @@ Chạy dưới dạng các Docker Container độc lập 24/7, đẩy dữ liệ
   `Silver Batch (PySpark) → DQ Health Check → GX Validation → Gold dbt Run`
 * **Fail-fast mechanism:** Tại task `DQ Health Check`, nếu tỷ lệ bản ghi lỗi trong bảng Quarantine > 5%, Airflow sẽ tự động ngắt toàn bộ pipeline để ngăn chặn dữ liệu bẩn lọt vào Gold.
 
-### 6. Visualization
+### 6. Visualization (Trực quan hóa)
 * **Power BI:** Kết nối trực tiếp vào các bảng Data Mart ở lớp Gold qua chế độ **DirectQuery**, giúp Dashboard luôn cập nhật và tối ưu tốc độ truy vấn mà không cần mô hình Data Model phức tạp.
+* **Data Lakehouse Explorer (Web UI):** Xây dựng bằng **Streamlit** và **DuckDB**. Ứng dụng cung cấp giao diện tương tác cho phép người dùng (Data Engineer / Data Steward) khám phá trực tiếp dữ liệu thô (Bronze), dữ liệu đã làm sạch (Silver), dữ liệu bị cách ly (Quarantine), và các bảng phân tích (Gold) ngay trên trình duyệt với độ trễ cực thấp. Đồng thời tích hợp báo cáo chất lượng dữ liệu từ Great Expectations và Pytest.
 
 ---
 
@@ -50,9 +51,10 @@ Chạy dưới dạng các Docker Container độc lập 24/7, đẩy dữ liệ
 
 * **Ngôn ngữ:** Python 3.11, SQL
 * **Xử lý Dữ liệu:** Apache Spark (PySpark), dbt Core, DuckDB
-* **Kiểm định Chất lượng (Data Quality):** Great Expectations
+* **Kiểm định Chất lượng (Data Quality):** Great Expectations, Pytest
 * **Message Broker / CDC:** Azure Event Hubs (Kafka API), Debezium
 * **Lưu trữ:** Azure Data Lake Storage Gen2 (ADLS Gen2), Delta Lake
+* **Giao diện người dùng (Web UI):** Streamlit
 * **Điều phối (Orchestration):** Apache Airflow
 * **Hạ tầng (Infrastructure):** Docker & Docker Compose
 
@@ -82,6 +84,7 @@ docker compose up -d --build
 ### 3. Theo dõi & Quản lý
 Khi các Container báo trạng thái `healthy`, bạn có thể truy cập:
 * **Apache Airflow UI:** [http://localhost:8888](http://localhost:8888) (Tài khoản: `admin` / Mật khẩu: `admin`)
+* **Data Lakehouse Explorer (Web UI):** [http://localhost:8501](http://localhost:8501)
 * **Great Expectations Data Docs:** Mở file HTML trong thư mục `dags/gx_data_docs/` sau khi DAG chạy thành công.
 
 ### 4. Chạy luồng xử lý dữ liệu (Trigger DAG)
@@ -99,6 +102,7 @@ vinamik-lakehouse/
 ├── dags/                  # DAG điều phối Airflow (4 tasks)
 ├── dbt_gold/              # dbt project xử lý dữ liệu tầng Gold (7 models)
 ├── spark/                 # PySpark (Bronze streaming, Silver batch, DQ checks)
+├── web_ui/                # Source code giao diện Data Lakehouse Explorer (Streamlit)
 ├── producers/             # Scripts đẩy dữ liệu (MISA, FX API, Budget Sheets)
 ├── data_generator/        # Script giả lập ERP Transactions
 ├── debezium-standalone/   # Cấu hình Debezium CDC

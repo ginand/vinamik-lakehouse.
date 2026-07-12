@@ -41,7 +41,7 @@ SELECT
     )                                                                              AS net_balance_vnd,
     NOW()                                                                          AS _gold_computed_at
 FROM gl
-LEFT JOIN txn ON gl.txn_id = txn.txn_id
+INNER JOIN txn ON gl.txn_id = txn.txn_id
 GROUP BY
     gl.account_id, txn.company_code,
     txn.fiscal_year, txn.fiscal_period, txn.posting_month
